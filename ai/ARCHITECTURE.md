@@ -10,10 +10,11 @@ Ableton Library is a metadata and preview indexing system for Ableton projects, 
 
 ### Repository Layout (Cargo workspace)
 ```
-crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> ProjectSnapshot (serde)
-crates/indexer/    # lib: SQLite (rusqlite + FTS5), incremental scan (walkdir, mtime+hash)
-crates/cli/        # bin: `ableton-scan` (clap) — scan, query, inspect
-app/               # Tauri 2 + React/TS (Milestone 2+); later: symphonia for waveform peaks
+crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot (serde)  [BUILT, verified vs oracle]
+crates/cli/        # bin: `ableton-scan` (clap + walkdir)  [BUILT, verified vs oracle]
+crates/indexer/    # lib: SQLite (rusqlite + FTS5), incremental scan (mtime+hash)  [NEXT]
+tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
+app/               # Tauri 2 + React/TS (Milestone 3+); later: symphonia for waveform peaks
 ```
 
 ## System Components

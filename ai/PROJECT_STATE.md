@@ -1,15 +1,16 @@
 # Project State
 
 ## Current Focus
-Phase: Milestone 1 — Metadata Extraction (2026-06-11)
-- [x] Pivot to Filesystem-first architecture (Live 11+ support).
-- [x] Select technology stack -> **Rust core + Tauri 2 shell + React/TS frontend + SQLite** (decided 2026-06-11; owner learning Rust alongside).
-- [x] Scaffold Cargo workspace (crates/als-core, crates/cli; indexer + app/ deferred).
-- [x] Implement `als-core`: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot JSON.
-- [x] Implement `cli` (`ableton-scan`): scan folder of projects, emit snapshots.
-- [x] Validate extraction logic against real .als fixtures -> via `tools/reference_extract.py` (executable spec / test oracle; all 5 sets, 0 warnings).
-- [ ] **NEXT (on user's Mac)**: `cargo build`, run `ableton-scan example-project-library --pretty`, diff JSON against the Python oracle, fix any compile/output drift. (Sandbox cannot install Rust toolchain — network allowlist blocks rustup/static.rust-lang.org.)
-- [ ] Implement `indexer` crate (SQLite + FTS5).
+Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
+- [ ] Implement `indexer` crate: SQLite (rusqlite, bundled) + FTS5 over names; schema projects -> sets -> tracks/devices/samples + previews; incremental reindex keyed on mtime + content_hash.
+- [ ] CLI subcommands: `scan` (index into db), `query`/`search`, `inspect <set>`.
+- [ ] Decide index location (app data dir, e.g. ~/Library/Application Support/ableton-library/).
+
+## Milestone 1 — Metadata Extraction: ✅ DONE (2026-06-11)
+- [x] Cargo workspace: crates/als-core (parser lib), crates/cli (binary `ableton-scan` — defined in crates/cli/Cargo.toml [[bin]]).
+- [x] `als-core`: streaming gzip+XML -> SetSnapshot; lenient, version-tolerant, skips bulk subtrees.
+- [x] **VERIFIED on host Mac**: `cargo build` clean; `ableton-scan` output diffs CLEAN against `tools/reference_extract.py` (the executable spec / test oracle) on all 4 fixture projects / 5 sets, 0 warnings.
+- Note: sandbox cannot install Rust toolchain (network allowlist); all Rust verification happens on the user's Mac. Keep oracle in sync with any parser change.
 
 ## Current Assumptions & Validations
 - **Assumption A**: Ableton Extensions SDK can read Live Set metadata. -> **REJECTED** (Live 12 Suite Beta only; user is on Live 11). SDK is permanently off the table — filesystem-first is the strategy, not a fallback.
