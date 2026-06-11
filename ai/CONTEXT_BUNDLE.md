@@ -1,5 +1,5 @@
 # AI Context Bundle
-Generated: Thu Jun 11 23:35:14 UTC 2026
+Generated: Thu Jun 11 23:40:41 UTC 2026
 
 ## ⚠️ Agent Navigation Guide
 1. Start with the **Current State** below to understand the focus.
@@ -102,7 +102,14 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
 # Project State
 
 ## Current Focus
-Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
+Phase: UI skeleton (Tauri) — built, awaiting first run on host (2026-06-11)
+- [x] `indexer` refactor: `set_detail`/`resolve_set` moved into lib (shared CLI + app); Serialize on SearchHit/Stats.
+- [x] `app/src-tauri`: Tauri 2 backend, commands `search`/`inspect`/`stats` (snake_case args) over the shared catalog; bundle inactive (dev-only, no icons needed yet); workspace member.
+- [x] `app/` frontend: React 18 + Vite + TS; debounced search, bpm/plugin filters, results table, detail pane (tracks/devices/samples/locators chips), partial-catalog empty state, dark theme.
+- [ ] **NEXT (on user's Mac)**: `cd app && npm install && npm run tauri dev` (first run compiles Tauri ~minutes). Fix compile/runtime issues. Verify against indexed fixtures + any real folders indexed so far.
+- [ ] Then (Milestone 3): previews table + discovery -> waveform peaks -> player in detail pane; later the automated Live export worker.
+
+## Milestone 2 — Project Catalog (indexer): ✅ DONE (2026-06-11)
 - [x] Implement `indexer` crate: SQLite (rusqlite bundled) + FTS5; schema projects -> sets -> tracks/devices/samples/locators/backups; incremental via (file_size, mtime) freshness check; prune removed sets.
 - [x] CLI subcommands: `json` (oracle-compatible dump), `scan`, `search` (FTS + --min-bpm/--max-bpm/--plugin), `inspect`, `stats`.
 - [x] Index location: dirs::data_dir()/ableton-library/library.db (macOS: ~/Library/Application Support/...), `--db` override.
@@ -183,6 +190,13 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 ./crates/als-core
 ./crates/cli
 ./crates/indexer
+./app
+./app/index.html
+./app/package.json
+./app/src-tauri
+./app/tsconfig.json
+./app/vite.config.ts
+./app/src
 ./example-project-library
 ./example-project-library/big guy Project
 ./example-project-library/522 idea Project
@@ -209,15 +223,26 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 
 ## 5. Recent Git Changes (Summary)
 ```text
+ef9aba0 M2 verified on host; decide incremental-adoption indexing strategy (defer full iCloud scan; catalog is never assumed complete)
 868a0f9 Add scan --force + schema versioning (PRAGMA user_version); refuse mismatched catalogs
 71e95d9 M2: indexer crate (SQLite+FTS5, incremental, prune) + CLI subcommands
 dbdcf2d Context audit: close fixture-version gap, retire proven risks, move Assumption C, log repo conventions; regenerate CONTEXT_BUNDLE
 f7e57bd update clock
-884b891 gitignore: normalize (user edit); untrack Cargo.lock per user preference
 ```
 
 ## 6. Active Diff
 ```diff
+diff --git a/.gitignore b/.gitignore
+index 4b6bb5e..06bb931 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -2,3 +2,6 @@ example-project-library
+ .DS_Store
+ target/
+ exports
++node_modules/
++dist/
++app/src-tauri/gen/
 diff --git a/Cargo.lock b/Cargo.lock
 index 1225224..60dbfa8 100644
 --- a/Cargo.lock
@@ -307,15 +332,4 @@ index 1225224..60dbfa8 100644
 +]
 +
 +[[package]]
-+name = "dirs-sys"
-+version = "0.4.1"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "520f05a5cbd335fae5a99ff7a6ab8627577660ee5cfd6a94a6a929b52ff0321c"
-+dependencies = [
-+ "libc",
-+ "option-ext",
-+ "redox_users",
-+ "windows-sys 0.48.0",
-+]
-+
 ```

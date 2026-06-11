@@ -51,12 +51,25 @@ find "<icloud projects root>" -name "*.icloud" | head
 
 If that prints anything, those files aren't local yet — download them first (Finder → select the folder → right-click → Download Now), then scan. Start with a subfolder (one year, one artist) before scanning the whole tree.
 
+## Desktop app (Tauri)
+
+A native browser over the same catalog the CLI writes. Requires Node 18+.
+
+```bash
+cd app
+npm install
+npm run tauri dev    # first run compiles the Tauri backend — takes a few minutes
+```
+
+The app reads `~/Library/Application Support/ableton-library/library.db` — index something with `ableton-scan scan <folder>` first. The catalog is treated as partial by design: scan folders piecemeal and the app shows whatever's indexed so far.
+
 ## Repository layout
 
 ```
-crates/als-core/            # parser lib: gzip + streaming XML -> SetSnapshot
+crates/als-core/            # parser lib: gzip + streaming XML -> SetSnapshot; discovery
+crates/indexer/             # SQLite + FTS5 catalog (shared by CLI and app)
 crates/cli/                 # the ableton-scan binary
-crates/indexer/             # (next) SQLite + FTS5 catalog
+app/                        # Tauri 2 + React desktop app (src-tauri/ = Rust side)
 tools/reference_extract.py  # executable spec / test oracle for als-core
 ai/                         # project state, architecture, agent rules (start here)
 example-project-library/    # local test fixtures (gitignored)

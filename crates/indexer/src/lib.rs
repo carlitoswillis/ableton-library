@@ -296,6 +296,7 @@ pub struct SearchOpts {
     pub plugin: Option<String>,
 }
 
+#[derive(serde::Serialize)]
 pub struct SearchHit {
     pub set_id: i64,
     pub project: String,
@@ -333,6 +334,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+#[derive(serde::Serialize)]
 pub struct Stats {
     pub projects: i64,
     pub sets: i64,
@@ -340,6 +342,96 @@ pub struct Stats {
     pub devices: i64,
     pub samples: i64,
     pub backups: i64,
+}
+
+/// Resolve a set reference: numeric id, exact als_path, or path fragment.
+pub fn resolve_set(conn: &Connection, query: &str) -> Result<i64> {
+    if let Ok(id) = query.parse::<i64>() {
+        return Ok(id);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT id FROM sets WHERE als_path = ?1
+             OR als_path LIKE '%' || ?1 || '%' LIMIT 1",
+            params![query],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("no set matching '{query}'"))?)
+}
+
+/// Full stored detail for one set as JSON (shared by CLI inspect and the app).
+pub fn set_detail(conn: &Connection, set_id: i64) -> Result<serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    conn.query_row(
+        "SELECT s.als_path, s.live_version, s.tempo, s.time_signature, s.warnings, p.name
+         FROM sets s JOIN projects p ON p.id = s.project_id WHERE s.id = ?1",
+        params![set_id],
+        |r| {
+            out.insert("set_id".into(), set_id.into());
+            out.insert("project".into(), r.get::<_, String>(5)?.into());
+            out.insert("als_path".into(), r.get::<_, String>(0)?.into());
+            out.insert("live_version".into(), r.get::<_, Option<String>>(1)?.into());
+            out.insert("tempo".into(), r.get::<_, Option<f64>>(2)?.into());
+            out.insert("time_signature".into(), r.get::<_, Option<String>>(3)?.into());
+            let w: String = r.get(4)?;
+            out.insert(
+                "warnings".into(),
+                serde_json::from_str(&w).unwrap_or(serde_json::Value::Null),
+            );
+            Ok(())
+        },
+    )
+    .with_context(|| format!("no set with id {set_id}"))?;
+
+    let list = |sql: &str, cols: &[&str]| -> Result<serde_json::Value> {
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = stmt.query(params![set_id])?;
+        let mut arr = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mut obj = serde_json::Map::new();
+            for (i, c) in cols.iter().enumerate() {
+                let v: rusqlite::types::Value = row.get(i)?;
+                obj.insert(
+                    (*c).into(),
+                    match v {
+                        rusqlite::types::Value::Null => serde_json::Value::Null,
+                        rusqlite::types::Value::Integer(n) => n.into(),
+                        rusqlite::types::Value::Real(f) => f.into(),
+                        rusqlite::types::Value::Text(s) => s.into(),
+                        rusqlite::types::Value::Blob(_) => serde_json::Value::Null,
+                    },
+                );
+            }
+            arr.push(serde_json::Value::Object(obj));
+        }
+        Ok(serde_json::Value::Array(arr))
+    };
+    out.insert(
+        "tracks".into(),
+        list(
+            "SELECT idx, kind, name, color FROM tracks WHERE set_id = ?1 ORDER BY idx",
+            &["idx", "kind", "name", "color"],
+        )?,
+    );
+    out.insert(
+        "devices".into(),
+        list(
+            "SELECT track_ref, kind, name, manufacturer FROM devices WHERE set_id = ?1",
+            &["track", "kind", "name", "manufacturer"],
+        )?,
+    );
+    out.insert(
+        "samples".into(),
+        list(
+            "SELECT path, in_project, exists_on_disk FROM samples WHERE set_id = ?1",
+            &["path", "in_project", "exists_on_disk"],
+        )?,
+    );
+    out.insert(
+        "locators".into(),
+        list("SELECT name, time FROM locators WHERE set_id = ?1", &["name", "time"])?,
+    );
+    Ok(serde_json::Value::Object(out))
 }
 
 pub fn stats(conn: &Connection) -> Result<Stats> {

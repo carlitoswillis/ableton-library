@@ -2,3 +2,6 @@ example-project-library
 .DS_Store
 target/
 exports
+node_modules/
+dist/
+app/src-tauri/gen/

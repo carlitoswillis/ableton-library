@@ -200,81 +200,9 @@ fn cmd_search(
 
 fn cmd_inspect(set: &str, db: Option<PathBuf>) -> Result<()> {
     let conn = indexer::open(&db_path(db)?)?;
-    // Resolve: numeric id, exact path, then path fragment.
-    let set_id: i64 = if let Ok(id) = set.parse::<i64>() {
-        id
-    } else {
-        conn.query_row(
-            "SELECT id FROM sets WHERE als_path = ?1
-             OR als_path LIKE '%' || ?1 || '%' LIMIT 1",
-            rusqlite::params![set],
-            |r| r.get(0),
-        )
-        .with_context(|| format!("no set matching '{set}'"))?
-    };
-
-    let mut out = serde_json::Map::new();
-    conn.query_row(
-        "SELECT s.als_path, s.live_version, s.tempo, s.time_signature, s.warnings, p.name
-         FROM sets s JOIN projects p ON p.id = s.project_id WHERE s.id = ?1",
-        rusqlite::params![set_id],
-        |r| {
-            out.insert("set_id".into(), set_id.into());
-            out.insert("project".into(), r.get::<_, String>(5)?.into());
-            out.insert("als_path".into(), r.get::<_, String>(0)?.into());
-            out.insert("live_version".into(), r.get::<_, Option<String>>(1)?.into());
-            out.insert("tempo".into(), r.get::<_, Option<f64>>(2)?.into());
-            out.insert("time_signature".into(), r.get::<_, Option<String>>(3)?.into());
-            let w: String = r.get(4)?;
-            out.insert(
-                "warnings".into(),
-                serde_json::from_str(&w).unwrap_or(serde_json::Value::Null),
-            );
-            Ok(())
-        },
-    )
-    .with_context(|| format!("no set with id {set_id}"))?;
-
-    let list = |sql: &str, cols: &[&str]| -> Result<serde_json::Value> {
-        let mut stmt = conn.prepare(sql)?;
-        let mut rows = stmt.query(rusqlite::params![set_id])?;
-        let mut arr = Vec::new();
-        while let Some(row) = rows.next()? {
-            let mut obj = serde_json::Map::new();
-            for (i, c) in cols.iter().enumerate() {
-                let v: rusqlite::types::Value = row.get(i)?;
-                obj.insert((*c).into(), match v {
-                    rusqlite::types::Value::Null => serde_json::Value::Null,
-                    rusqlite::types::Value::Integer(n) => n.into(),
-                    rusqlite::types::Value::Real(f) => f.into(),
-                    rusqlite::types::Value::Text(s) => s.into(),
-                    rusqlite::types::Value::Blob(_) => serde_json::Value::Null,
-                });
-            }
-            arr.push(serde_json::Value::Object(obj));
-        }
-        Ok(serde_json::Value::Array(arr))
-    };
-    out.insert(
-        "tracks".into(),
-        list("SELECT idx, kind, name, color FROM tracks WHERE set_id = ?1 ORDER BY idx",
-             &["idx", "kind", "name", "color"])?,
-    );
-    out.insert(
-        "devices".into(),
-        list("SELECT track_ref, kind, name, manufacturer FROM devices WHERE set_id = ?1",
-             &["track", "kind", "name", "manufacturer"])?,
-    );
-    out.insert(
-        "samples".into(),
-        list("SELECT path, in_project, exists_on_disk FROM samples WHERE set_id = ?1",
-             &["path", "in_project", "exists_on_disk"])?,
-    );
-    out.insert(
-        "locators".into(),
-        list("SELECT name, time FROM locators WHERE set_id = ?1", &["name", "time"])?,
-    );
-    println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(out))?);
+    let set_id = indexer::resolve_set(&conn, set)?;
+    let detail = indexer::set_detail(&conn, set_id)?;
+    println!("{}", serde_json::to_string_pretty(&detail)?);
     Ok(())
 }
 
