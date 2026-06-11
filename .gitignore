@@ -1,6 +1,5 @@
 example-project-library
 .DS_Store
 target/
-py.json
-rust.json
-Cargo.lockexports/
+exports
+Cargo.lock
