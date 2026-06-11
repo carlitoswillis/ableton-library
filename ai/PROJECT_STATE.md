@@ -22,6 +22,7 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 ## Current Assumptions & Validations
 - **Assumption A**: Ableton Extensions SDK can read Live Set metadata. -> **REJECTED** (Live 12 Suite Beta only; user is on Live 11). SDK is permanently off the table — filesystem-first is the strategy, not a fallback.
 - **Assumption B**: Ableton Extensions SDK can identify tracks and clips. -> **MOOT** (SDK ruled out per Assumption A).
+- **Assumption C**: Automated preview generation may be possible. -> **VALIDATED in principle**: owner previously scripted a second Live install to open + export sets via macOS UI automation. Previews = pluggable source interface: discovery (MVP) -> automated Live export worker (post-catalog). **Unverified** whether Live 12 desktop writes preview audio on save.
 - **Constraint**: Parser must be version-tolerant across Live versions, backward (9/10/11) and forward (12+). Lenient extraction; never hard-fail on schema drift.
 
 ## Format Findings (2026-06-11, from /example-project-library — Live 11.3.43)
@@ -33,8 +34,7 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 - Samples: absolute paths in `<Path>` under `FileRef`, reference files across projects/Downloads/iCloud -> missing-sample detection + cross-project sample queries high-value.
 - Noise: thousands of AutomationTarget/PluginFloatParameter elements = most of file size -> parser must skip these subtrees (392KB .als -> 8.1MB XML).
 - `Backup/` folder per project = free timestamped lineage; multi-set projects confirmed (wanna be your + wanna be your2).
-- Gap: all fixtures are 11.3.43; need older-era .als for backward-compat testing.
-- **Assumption C**: Automated preview generation may be possible. -> **VALIDATED in principle**: owner previously scripted a second Live install to open + export sets via macOS UI automation. Previews = pluggable source interface: discovery (MVP) -> automated Live export worker (post-catalog). **Unverified** whether Live 12 desktop writes preview audio on save.
+- ~~Gap: all fixtures are 11.3.43~~ -> CLOSED: real-library scan validated Live 10.1.30-11.3.43. Remaining untested: Live 9 and 12+.
 
 ## Active Milestones
 - **Milestone 1: Metadata Extraction**: Generate structured output from .als files (Gzip/XML parsing).
@@ -44,6 +44,7 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 ## Decisions
 - **Backups**: lineage-only indexing (filename, timestamp, size); full parse behind a `--deep` flag later. (2026-06-11)
 - **Snapshot schema**: SetSnapshot/ProjectSnapshot as defined in als-core (version, tempo, time sig, tracks, devices, samples, locators, warnings). Approved 2026-06-11.
+- **Repo conventions**: scan JSON outputs go in `exports/` (gitignored); Cargo.lock untracked (user preference; revisit — convention for binary projects is to commit it). (2026-06-11)
 
 ## Backlog
 - [ ] Automated Live export worker (second Live install + UI automation; see ARCHITECTURE.md Preview Service)
@@ -55,6 +56,7 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 - [ ] Track fingerprints
 
 ## Risks
-- SDK limitations (Mitigation: Filesystem-first approach).
-- Parsing complexity (.als files are gzipped XML).
+- ~~SDK limitations~~ RETIRED: filesystem-first proven end-to-end.
+- ~~Parsing complexity~~ RETIRED: parser validated on ~136 real sets across Live 10.1-11.3.
+- iCloud eviction: slows scans, corrupts `exists` signal (backlog: `evicted` state).
 - Scope creep (Mitigation: No AI features until catalog exists).
