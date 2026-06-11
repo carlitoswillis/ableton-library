@@ -1,5 +1,5 @@
 # AI Context Bundle
-Generated: Thu Jun 11 23:40:41 UTC 2026
+Generated: Thu Jun 11 23:43:06 UTC 2026
 
 ## ⚠️ Agent Navigation Guide
 1. Start with the **Current State** below to understand the focus.
@@ -59,7 +59,7 @@ crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapsh
 crates/cli/        # bin: `ableton-scan` (clap + walkdir)  [BUILT, verified vs oracle]
 crates/indexer/    # lib: SQLite (rusqlite + FTS5), incremental scan (mtime+hash)  [NEXT]
 tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
-app/               # Tauri 2 + React/TS (Milestone 3+); later: symphonia for waveform peaks
+app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: symphonia for waveform peaks
 ```
 
 ## System Components
@@ -85,9 +85,10 @@ app/               # Tauri 2 + React/TS (Milestone 3+); later: symphonia for wav
 - **Previews are per-SET, not per-project** (projects can hold multiple distinct .als, e.g. "wanna be your" + "wanna be your2"). Discovery must match found renders to sets by filename similarity (normalized prefix match vs set name); ambiguous matches attach at project level with low confidence. The export worker has no ambiguity (it knows which set it rendered).
 - **Waveforms**: Decode (symphonia), precompute peaks once, cache keyed by set hash.
 
-### 4. User Interface — Tauri 2 (Milestone 2+)
-- **Decision**: Tauri 2 shell, React/TS frontend; core logic lives in the Tauri Rust backend (no sidecar). Audio streamed to webview via asset protocol.
-- **Views**: Library View (Search/Filters), Project Detail View (Metadata/Tracks/Player).
+### 4. User Interface — Tauri 2 [skeleton BUILT 2026-06-11]
+- **Decision**: Tauri 2 shell, React/TS frontend; core logic lives in the Tauri Rust backend (no sidecar). Audio streamed to webview via asset protocol (when previews land).
+- **Implemented**: commands `search`/`inspect`/`stats` (thin wrappers over `indexer`); debounced FTS search, bpm/plugin filters, results table, detail pane. Dev-only config (bundle.active=false, no icons yet).
+- **Views**: Library View (Search/Filters) ✓, Set Detail pane ✓; Player pending Milestone 3.
 
 ## Data Flow
 Filesystem (.als) -> als-core (streaming parse) -> indexer (SQLite) -> Tauri commands -> React UI
@@ -162,7 +163,7 @@ Phase: UI skeleton (Tauri) — built, awaiting first run on host (2026-06-11)
 ## Decisions
 - **Backups**: lineage-only indexing (filename, timestamp, size); full parse behind a `--deep` flag later. (2026-06-11)
 - **Snapshot schema**: SetSnapshot/ProjectSnapshot as defined in als-core (version, tempo, time sig, tracks, devices, samples, locators, warnings). Approved 2026-06-11.
-- **Repo conventions**: scan JSON outputs go in `exports/` (gitignored); Cargo.lock untracked (user preference; revisit — convention for binary projects is to commit it). (2026-06-11)
+- **Repo conventions**: scan JSON outputs go in `exports/` (gitignored); lockfiles (Cargo.lock, app/package-lock.json) ARE tracked (user flipped to binary-project convention); local *.db files gitignored (catalog = rebuildable cache, lives in app data dir). (2026-06-11)
 
 ## Backlog
 - [ ] Automated Live export worker (second Live install + UI automation; see ARCHITECTURE.md Preview Service)
@@ -192,6 +193,8 @@ Phase: UI skeleton (Tauri) — built, awaiting first run on host (2026-06-11)
 ./crates/indexer
 ./app
 ./app/index.html
+./app/node_modules
+./app/package-lock.json
 ./app/package.json
 ./app/src-tauri
 ./app/tsconfig.json
@@ -223,31 +226,46 @@ Phase: UI skeleton (Tauri) — built, awaiting first run on host (2026-06-11)
 
 ## 5. Recent Git Changes (Summary)
 ```text
+cf796a7 UI skeleton: Tauri 2 + React app over shared indexer
 ef9aba0 M2 verified on host; decide incremental-adoption indexing strategy (defer full iCloud scan; catalog is never assumed complete)
 868a0f9 Add scan --force + schema versioning (PRAGMA user_version); refuse mismatched catalogs
 71e95d9 M2: indexer crate (SQLite+FTS5, incremental, prune) + CLI subcommands
 dbdcf2d Context audit: close fixture-version gap, retire proven risks, move Assumption C, log repo conventions; regenerate CONTEXT_BUNDLE
-f7e57bd update clock
 ```
 
 ## 6. Active Diff
 ```diff
 diff --git a/.gitignore b/.gitignore
-index 4b6bb5e..06bb931 100644
+index 06bb931..2b8f877 100644
 --- a/.gitignore
 +++ b/.gitignore
-@@ -2,3 +2,6 @@ example-project-library
+@@ -1,7 +1,20 @@
++# user fixtures / outputs
+ example-project-library
++exports
++
++# OS
  .DS_Store
++
++# rust
  target/
- exports
-+node_modules/
-+dist/
-+app/src-tauri/gen/
+-exports
++
++# frontend
+ node_modules/
+ dist/
+ app/src-tauri/gen/
++.vite/
++
++# local catalogs (the db is rebuildable cache; lives in app data dir by default)
++*.db
++*.db-shm
++*.db-wal
 diff --git a/Cargo.lock b/Cargo.lock
-index 1225224..60dbfa8 100644
+index 1225224..89c6175 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -8,6 +8,18 @@ version = "2.0.1"
+@@ -8,16 +8,53 @@ version = "2.0.1"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
  
@@ -263,18 +281,47 @@ index 1225224..60dbfa8 100644
 + "zerocopy",
 +]
 +
++[[package]]
++name = "aho-corasick"
++version = "1.1.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
++dependencies = [
++ "memchr",
++]
++
++[[package]]
++name = "alloc-no-stdlib"
++version = "2.0.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
++
++[[package]]
++name = "alloc-stdlib"
++version = "0.2.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "94fb8275041c72129eb51b7d0322c29b8387a0386127718b096429201a5d6ece"
++dependencies = [
++ "alloc-no-stdlib",
++]
++
  [[package]]
  name = "als-core"
  version = "0.1.0"
-@@ -18,6 +30,7 @@ dependencies = [
+ dependencies = [
+  "chrono",
+  "flate2",
+- "quick-xml",
++ "quick-xml 0.36.2",
   "serde",
   "sha2",
-  "thiserror",
+- "thiserror",
++ "thiserror 1.0.69",
 + "walkdir",
  ]
  
  [[package]]
-@@ -65,7 +78,7 @@ version = "1.1.5"
+@@ -65,7 +102,7 @@ version = "1.1.5"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
  dependencies = [
@@ -283,53 +330,9 @@ index 1225224..60dbfa8 100644
  ]
  
  [[package]]
-@@ -76,7 +89,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
+@@ -76,7 +113,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
  dependencies = [
   "anstyle",
   "once_cell_polyfill",
 - "windows-sys",
-+ "windows-sys 0.61.2",
- ]
- 
- [[package]]
-@@ -91,6 +104,12 @@ version = "1.5.1"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
- 
-+[[package]]
-+name = "bitflags"
-+version = "2.13.0"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
-+
- [[package]]
- name = "block-buffer"
- version = "0.10.4"
-@@ -183,9 +202,10 @@ dependencies = [
-  "anyhow",
-  "chrono",
-  "clap",
-- "serde",
-+ "dirs",
-+ "indexer",
-+ "rusqlite",
-  "serde_json",
-- "walkdir",
- ]
- 
- [[package]]
-@@ -238,6 +258,39 @@ dependencies = [
-  "crypto-common",
- ]
- 
-+[[package]]
-+name = "dirs"
-+version = "5.0.1"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "44c45a9d03d6676652bcb5e724c7e988de1acad23a711b5217ab9cbecbec2225"
-+dependencies = [
-+ "dirs-sys",
-+]
-+
-+[[package]]
 ```

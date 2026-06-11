@@ -14,7 +14,7 @@ crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapsh
 crates/cli/        # bin: `ableton-scan` (clap + walkdir)  [BUILT, verified vs oracle]
 crates/indexer/    # lib: SQLite (rusqlite + FTS5), incremental scan (mtime+hash)  [NEXT]
 tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
-app/               # Tauri 2 + React/TS (Milestone 3+); later: symphonia for waveform peaks
+app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: symphonia for waveform peaks
 ```
 
 ## System Components
@@ -40,9 +40,10 @@ app/               # Tauri 2 + React/TS (Milestone 3+); later: symphonia for wav
 - **Previews are per-SET, not per-project** (projects can hold multiple distinct .als, e.g. "wanna be your" + "wanna be your2"). Discovery must match found renders to sets by filename similarity (normalized prefix match vs set name); ambiguous matches attach at project level with low confidence. The export worker has no ambiguity (it knows which set it rendered).
 - **Waveforms**: Decode (symphonia), precompute peaks once, cache keyed by set hash.
 
-### 4. User Interface — Tauri 2 (Milestone 2+)
-- **Decision**: Tauri 2 shell, React/TS frontend; core logic lives in the Tauri Rust backend (no sidecar). Audio streamed to webview via asset protocol.
-- **Views**: Library View (Search/Filters), Project Detail View (Metadata/Tracks/Player).
+### 4. User Interface — Tauri 2 [skeleton BUILT 2026-06-11]
+- **Decision**: Tauri 2 shell, React/TS frontend; core logic lives in the Tauri Rust backend (no sidecar). Audio streamed to webview via asset protocol (when previews land).
+- **Implemented**: commands `search`/`inspect`/`stats` (thin wrappers over `indexer`); debounced FTS search, bpm/plugin filters, results table, detail pane. Dev-only config (bundle.active=false, no icons yet).
+- **Views**: Library View (Search/Filters) ✓, Set Detail pane ✓; Player pending Milestone 3.
 
 ## Data Flow
 Filesystem (.als) -> als-core (streaming parse) -> indexer (SQLite) -> Tauri commands -> React UI
