@@ -12,6 +12,13 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 - [x] **VERIFIED on host Mac**: `cargo build` clean; `ableton-scan` output diffs CLEAN against `tools/reference_extract.py` (the executable spec / test oracle) on all 4 fixture projects / 5 sets, 0 warnings.
 - Note: sandbox cannot install Rust toolchain (network allowlist); all Rust verification happens on the user's Mac. Keep oracle in sync with any parser change.
 
+### Real-library validation (2026-06-11, user's iCloud library)
+- 2021 folder (nested year/month structure): 85 projects, 129 sets, 811 backups — no errors.
+- Version tolerance proven: Live 10.1.30 -> 11.3.43 (incl. betas), 0 warnings on all native Live sets.
+- Only warnings: 3 sets exported by **KORG Gadget** (also writes .als; no Tempo/Manual element) — degraded gracefully (tempo null + warning).
+- Caveat found: `exists` check can't distinguish iCloud-evicted placeholders from deleted samples -> backlog: third state `evicted` (detect `.icloud` placeholder files).
+- iCloud syncing noticeably slows scans (eviction-triggered downloads).
+
 ## Current Assumptions & Validations
 - **Assumption A**: Ableton Extensions SDK can read Live Set metadata. -> **REJECTED** (Live 12 Suite Beta only; user is on Live 11). SDK is permanently off the table — filesystem-first is the strategy, not a fallback.
 - **Assumption B**: Ableton Extensions SDK can identify tracks and clips. -> **MOOT** (SDK ruled out per Assumption A).
@@ -41,6 +48,7 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 ## Backlog
 - [ ] Automated Live export worker (second Live install + UI automation; see ARCHITECTURE.md Preview Service)
 - [ ] Preview archive: keep historical previews per set, potentially anchored to Backup/ timestamps (stretch; pairs with --deep backup parsing)
+- [ ] Sample `evicted` state: detect iCloud `.icloud` placeholders vs truly missing files
 - [ ] Automatic key detection
 - [ ] Similar project search
 - [ ] Plugin inventory
