@@ -2,4 +2,3 @@ example-project-library
 .DS_Store
 target/
 exports
-Cargo.lock
