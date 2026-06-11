@@ -281,7 +281,11 @@ pub fn parse_set(als_path: &Path, project_dir: &Path) -> Result<SetSnapshot, Par
 
     let mut st = State {
         snap: SetSnapshot {
-            als_path: als_path.to_string_lossy().into_owned(),
+            // Absolute, like the oracle's os.path.abspath (no symlink resolution).
+            als_path: std::path::absolute(als_path)
+                .unwrap_or_else(|_| als_path.to_path_buf())
+                .to_string_lossy()
+                .into_owned(),
             file_size: meta.len(),
             mtime: mtime.format("%Y-%m-%dT%H:%M:%S+00:00").to_string(),
             content_hash: sha256_file(als_path)?,

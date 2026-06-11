@@ -109,7 +109,7 @@ fn main() -> Result<()> {
         let backups = backups(&dir)?;
         eprintln!("{name}: {} set(s), {} backup(s)", sets.len(), backups.len());
         library.push(ProjectSnapshot {
-            folder_path: dir.canonicalize()?.to_string_lossy().into_owned(),
+            folder_path: std::path::absolute(&dir)?.to_string_lossy().into_owned(),
             name,
             sets,
             backups,
