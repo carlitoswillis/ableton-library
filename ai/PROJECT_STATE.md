@@ -12,7 +12,7 @@ Phase: Milestone 1 — Metadata Extraction (2026-06-11)
 ## Current Assumptions & Validations
 - **Assumption A**: Ableton Extensions SDK can read Live Set metadata. -> **REJECTED** (Reason: Live 12 Suite Beta only).
 - **Assumption B**: Ableton Extensions SDK can identify tracks and clips. -> **Unverified**.
-- **Assumption C**: Automated preview generation may be possible. -> **Reframed**: headless render of .als without Live is impossible; previews come from discovery (existing renders, possibly Live 12 set previews in `Ableton Project Info/`, frozen audio). **Unverified** whether Live 12 desktop writes preview audio on save.
+- **Assumption C**: Automated preview generation may be possible. -> **VALIDATED in principle**: owner previously scripted a second Live install to open + export sets via macOS UI automation. Previews = pluggable source interface: discovery (MVP) -> automated Live export worker (post-catalog). **Unverified** whether Live 12 desktop writes preview audio on save.
 
 ## Active Milestones
 - **Milestone 1: Metadata Extraction**: Generate structured output from .als files (Gzip/XML parsing).
@@ -20,6 +20,7 @@ Phase: Milestone 1 — Metadata Extraction (2026-06-11)
 - **Milestone 3: Preview Integration**: Display metadata, waveform, and audio preview.
 
 ## Backlog
+- [ ] Automated Live export worker (second Live install + UI automation; see ARCHITECTURE.md Preview Service)
 - [ ] Automatic key detection
 - [ ] Similar project search
 - [ ] Plugin inventory

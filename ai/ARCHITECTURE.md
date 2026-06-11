@@ -29,8 +29,12 @@ app/               # Tauri 2 + React/TS (Milestone 2+); later: symphonia for wav
 - **Model**: A project *folder* contains one or more `.als` *sets*. Tables: projects -> sets (tempo, version, hash, mtime) -> tracks, plugins, samples (path + missing flag), previews.
 - **Incremental**: Reindex keyed on mtime + content hash. Index lives in app data dir, never inside user project folders.
 
-### 3. Preview Service
-- **Constraint**: Headless render of .als without Live is impossible. Previews are *discovered*, priority order: (a) user-exported renders in/near project folder, (b) Live 12 set previews in `Ableton Project Info/` (verify), (c) frozen/processed audio fallback.
+### 3. Preview Service (pluggable source interface)
+- **Pipeline**: watcher sees .als save -> debounced job queue -> preview *source* resolves audio -> peaks cached -> catalog updated.
+- **Constraint**: Reimplementing Live's render engine is ruled out permanently. Live itself is the only correct renderer.
+- **Sources (priority)**:
+  - (a) **Discovery** (MVP): user-exported renders in/near project folder; Live 12 set previews in `Ableton Project Info/` (verify); frozen/processed audio fallback.
+  - (b) **Automated Live export** (flagship, post-catalog): worker launches a *second* Live install with the set, drives File -> Export via macOS UI automation (proven previously by owner). Constraints: serialize one render at a time; debounce save bursts; handle dialogs (missing samples, version prompts); UI scripting steals focus so make it opt-in/idle-scheduled; treat Live as flaky (timeouts, retry once, mark "render failed" rather than wedging queue). Isolated component — can start as a standalone script consuming jobs and emitting audio files.
 - **Waveforms**: Decode (symphonia), precompute peaks once, cache keyed by set hash.
 
 ### 4. User Interface — Tauri 2 (Milestone 2+)
