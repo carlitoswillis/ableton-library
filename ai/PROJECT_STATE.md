@@ -10,8 +10,9 @@ Phase: Milestone 1 — Metadata Extraction (2026-06-11)
 - [ ] Validate parser against real .als files from user's library.
 
 ## Current Assumptions & Validations
-- **Assumption A**: Ableton Extensions SDK can read Live Set metadata. -> **REJECTED** (Reason: Live 12 Suite Beta only).
-- **Assumption B**: Ableton Extensions SDK can identify tracks and clips. -> **Unverified**.
+- **Assumption A**: Ableton Extensions SDK can read Live Set metadata. -> **REJECTED** (Live 12 Suite Beta only; user is on Live 11). SDK is permanently off the table — filesystem-first is the strategy, not a fallback.
+- **Assumption B**: Ableton Extensions SDK can identify tracks and clips. -> **MOOT** (SDK ruled out per Assumption A).
+- **Constraint**: Parser must be version-tolerant across Live versions, backward (9/10/11) and forward (12+). Lenient extraction; never hard-fail on schema drift.
 - **Assumption C**: Automated preview generation may be possible. -> **VALIDATED in principle**: owner previously scripted a second Live install to open + export sets via macOS UI automation. Previews = pluggable source interface: discovery (MVP) -> automated Live export worker (post-catalog). **Unverified** whether Live 12 desktop writes preview audio on save.
 
 ## Active Milestones

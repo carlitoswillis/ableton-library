@@ -21,6 +21,7 @@ app/               # Tauri 2 + React/TS (Milestone 2+); later: symphonia for wav
 ### 1. Filesystem Scanner — `als-core` (Rust)
 - **Purpose**: Extract project information from Live Sets and folders.
 - **Approach**: Streaming XML parse (never full DOM — .als can decompress to 100s of MB).
+- **Version tolerance**: No Ableton SDK (user on Live 11; SDK is Live 12 Suite beta only). Parse leniently across Live versions, backward (9/10/11) and forward (12+): ignore unknown elements, tolerate missing ones, record Creator/version per set, and emit per-field extraction warnings instead of failing the whole file.
 - **Extracts**: Live version, tempo/time sig, tracks (type/name/color), clip names, device/plugin names, sample file references.
 - **Output**: Normalized ProjectSnapshot JSON per set.
 

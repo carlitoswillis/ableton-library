@@ -11,6 +11,8 @@ PURPOSE: This is the authoritative rulebook for AI assistants. It defines the 'h
   - **Frontend**: React, Vue, or Desktop Native (Electron, Tauri).
 
 ## Architecture Constraints
+- **No Ableton SDK dependency**: User runs Live 11; the Extensions SDK (Live 12 Suite beta only) is off the table. Filesystem-first is the strategy, not a fallback.
+- **Version tolerance (backward + forward)**: Parser must handle .als files from older Live versions (9/10/11) and newer ones (12+). Extract leniently — skip unknown elements, never hard-fail on schema drift, record the Live version (Creator attribute) per set.
 - **API/Service Structure**: Modular service for metadata and preview management.
 - **Database/Persistence**: Local persistence for indexing and snapshots.
 - **Markdown Persistence**: All state must be tracked in `/ai`.
