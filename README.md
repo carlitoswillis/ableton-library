@@ -14,6 +14,7 @@ alias ableton-scan=./target/release/ableton-scan
 
 # index a library into the SQLite catalog (incremental — rescans only changed files)
 ableton-scan scan "<path to your projects root>"
+ableton-scan scan "<root>" --force   # re-ingest everything (e.g. after parser upgrades)
 
 # query it
 ableton-scan search "korg"                       # FTS over project/set/track/device/sample names

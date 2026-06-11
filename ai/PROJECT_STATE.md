@@ -6,6 +6,7 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 - [x] CLI subcommands: `json` (oracle-compatible dump), `scan`, `search` (FTS + --min-bpm/--max-bpm/--plugin), `inspect`, `stats`.
 - [x] Index location: dirs::data_dir()/ableton-library/library.db (macOS: ~/Library/Application Support/...), `--db` override.
 - [x] Discovery moved to als-core::scan (shared with future Tauri app).
+- [x] `scan --force` (full re-ingest, e.g. after parser upgrades) + db stamped with PRAGMA user_version (SCHEMA_VERSION=1); mismatched dbs refused with rebuild instructions. Catalog is always fully rebuildable from .als files.
 - [ ] **NEXT (on user's Mac)**: `cargo build`; re-verify oracle (`json` subcommand now: `cargo run -p cli -- json example-project-library --pretty`); then `scan` + `search` against real library; second `scan` should report all-unchanged.
 - [ ] previews table (schema exists conceptually; add when preview discovery lands — Milestone 3).
 

@@ -82,6 +82,11 @@ CREATE INDEX IF NOT EXISTS idx_samples_path   ON samples(path);
 CREATE INDEX IF NOT EXISTS idx_backups_proj   ON backups(project_id);
 "#;
 
+/// Bump when the schema changes incompatibly. open() refuses mismatched dbs
+/// so stale catalogs are rebuilt (delete db or `scan --force`) instead of
+/// being silently misread.
+pub const SCHEMA_VERSION: i32 = 1;
+
 /// Open (creating if needed) the index database.
 pub fn open(db_path: &Path) -> Result<Connection> {
     if let Some(dir) = db_path.parent() {
@@ -92,7 +97,21 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         .with_context(|| format!("opening {}", db_path.display()))?;
     let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-    conn.execute_batch(SCHEMA)?;
+
+    let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version == 0 {
+        // New (or pre-versioning) db: create schema and stamp it.
+        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+    } else if version != SCHEMA_VERSION {
+        anyhow::bail!(
+            "catalog {} has schema v{version}, this build expects v{SCHEMA_VERSION} — \
+             delete the db and rescan (it is fully rebuildable from your .als files)",
+            db_path.display()
+        );
+    } else {
+        conn.execute_batch(SCHEMA)?; // idempotent (IF NOT EXISTS)
+    }
     Ok(conn)
 }
 

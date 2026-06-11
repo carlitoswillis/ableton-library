@@ -37,6 +37,9 @@ enum Cmd {
         root: PathBuf,
         #[arg(long)]
         db: Option<PathBuf>,
+        /// Re-parse and re-ingest every set, ignoring the freshness check.
+        #[arg(long)]
+        force: bool,
     },
     /// Search the catalog. TEXT uses FTS5 over project/set/track/device/sample names.
     Search {
@@ -75,7 +78,7 @@ fn db_path(opt: Option<PathBuf>) -> Result<PathBuf> {
 fn main() -> Result<()> {
     match Args::parse().cmd {
         Cmd::Json { root, pretty } => cmd_json(&root, pretty),
-        Cmd::Scan { root, db } => cmd_scan(&root, db),
+        Cmd::Scan { root, db, force } => cmd_scan(&root, db, force),
         Cmd::Search { text, min_bpm, max_bpm, plugin, db } => {
             cmd_search(text, min_bpm, max_bpm, plugin, db)
         }
@@ -114,7 +117,7 @@ fn cmd_json(root: &Path, pretty: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_scan(root: &Path, db: Option<PathBuf>) -> Result<()> {
+fn cmd_scan(root: &Path, db: Option<PathBuf>, force: bool) -> Result<()> {
     let db = db_path(db)?;
     let conn = indexer::open(&db)?;
     let root_abs = std::path::absolute(root)?;
@@ -133,7 +136,7 @@ fn cmd_scan(root: &Path, db: Option<PathBuf>) -> Result<()> {
             seen.insert(als_abs.clone());
             let size = std::fs::metadata(als)?.len();
             let mtime = iso_mtime(als)?;
-            if indexer::set_is_fresh(&conn, &als_abs, size, &mtime)? {
+            if !force && indexer::set_is_fresh(&conn, &als_abs, size, &mtime)? {
                 fresh += 1;
                 continue;
             }
