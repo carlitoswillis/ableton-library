@@ -87,3 +87,20 @@ pub struct Locator {
     /// Position in beats.
     pub time: Option<f64>,
 }
+
+/// A project folder: one or more sets plus Backup/ lineage.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectSnapshot {
+    pub folder_path: String,
+    pub name: String,
+    pub sets: Vec<SetSnapshot>,
+    pub backups: Vec<BackupEntry>,
+}
+
+/// Lineage-only record of a Backup/*.als — never parsed (see PROJECT_STATE.md).
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupEntry {
+    pub file: String,
+    pub size: u64,
+    pub mtime: String,
+}

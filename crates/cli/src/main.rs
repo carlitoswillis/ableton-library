@@ -1,122 +1,111 @@
-//! ableton-scan: scan a folder of Ableton projects into JSON snapshots.
+//! ableton-scan: catalog Ableton Live projects from the filesystem.
 //!
-//! Usage: ableton-scan <library-root> [--pretty]
-//! JSON (array of ProjectSnapshot) on stdout, human summary on stderr.
-//! Output shape matches tools/reference_extract.py (the test oracle):
-//!   diff <(ableton-scan lib) <(python3 tools/reference_extract.py lib)
+//! Subcommands:
+//!   json <root>      one-shot JSON dump (oracle-compatible; diff vs tools/reference_extract.py)
+//!   scan <root>      incremental index into the SQLite catalog
+//!   search [TEXT]    query the catalog (FTS + tempo/plugin filters)
+//!   inspect <SET>    full detail for one set (by id or path fragment)
+//!   stats            catalog row counts
+//!
+//! Default db: <app data dir>/ableton-library/library.db (override with --db).
 
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use chrono::{DateTime, Utc};
-use clap::Parser;
-use serde::Serialize;
-use walkdir::WalkDir;
+use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
 
-use als_core::{parse_set, DeviceKind, SetSnapshot};
+use als_core::{discover, parse_set, scan::iso_mtime, ProjectSnapshot, SetSnapshot};
 
 #[derive(Parser)]
 #[command(name = "ableton-scan", about = "Index Ableton Live projects from the filesystem")]
 struct Args {
-    /// Root folder containing Ableton projects
-    root: PathBuf,
-    /// Pretty-print JSON output
-    #[arg(long)]
-    pretty: bool,
+    #[command(subcommand)]
+    cmd: Cmd,
 }
 
-#[derive(Serialize)]
-struct ProjectSnapshot {
-    folder_path: String,
-    name: String,
-    sets: Vec<SetSnapshot>,
-    backups: Vec<BackupEntry>,
+#[derive(Subcommand)]
+enum Cmd {
+    /// Parse everything and print JSON (no database). Matches the Python oracle.
+    Json {
+        root: PathBuf,
+        #[arg(long)]
+        pretty: bool,
+    },
+    /// Incrementally index a library into the SQLite catalog.
+    Scan {
+        root: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Search the catalog. TEXT uses FTS5 over project/set/track/device/sample names.
+    Search {
+        text: Option<String>,
+        #[arg(long)]
+        min_bpm: Option<f64>,
+        #[arg(long)]
+        max_bpm: Option<f64>,
+        /// Substring match on device/plugin name.
+        #[arg(long)]
+        plugin: Option<String>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Show full stored detail for one set (id, exact path, or path fragment).
+    Inspect {
+        set: String,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Catalog row counts.
+    Stats {
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
 }
 
-/// Lineage-only record of a Backup/*.als (not parsed; see PROJECT_STATE.md).
-#[derive(Serialize)]
-struct BackupEntry {
-    file: String,
-    size: u64,
-    mtime: String,
-}
-
-fn iso_mtime(path: &Path) -> Result<String> {
-    let t: DateTime<Utc> = std::fs::metadata(path)?.modified()?.into();
-    Ok(t.format("%Y-%m-%dT%H:%M:%S+00:00").to_string())
-}
-
-fn backups(project_dir: &Path) -> Result<Vec<BackupEntry>> {
-    let dir = project_dir.join("Backup");
-    let mut out = Vec::new();
-    if dir.is_dir() {
-        let mut names: Vec<PathBuf> = std::fs::read_dir(&dir)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().map_or(false, |x| x == "als"))
-            .collect();
-        names.sort();
-        for p in names {
-            out.push(BackupEntry {
-                file: p.file_name().unwrap().to_string_lossy().into_owned(),
-                size: std::fs::metadata(&p)?.len(),
-                mtime: iso_mtime(&p)?,
-            });
-        }
+fn db_path(opt: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(p) = opt {
+        return Ok(p);
     }
-    Ok(out)
+    let base = dirs::data_dir().context("no app data dir on this platform")?;
+    Ok(base.join("ableton-library").join("library.db"))
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
-
-    // A "project" is any directory directly containing .als files.
-    // Backup/ directories hold timestamped lineage, indexed but not parsed.
-    let mut projects: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
-    for entry in WalkDir::new(&args.root)
-        .into_iter()
-        .filter_entry(|e| e.file_name() != "Backup")
-        .filter_map(|e| e.ok())
-    {
-        let p = entry.path();
-        if p.extension().map_or(false, |x| x == "als") {
-            projects
-                .entry(p.parent().unwrap().to_path_buf())
-                .or_default()
-                .push(p.to_path_buf());
+    match Args::parse().cmd {
+        Cmd::Json { root, pretty } => cmd_json(&root, pretty),
+        Cmd::Scan { root, db } => cmd_scan(&root, db),
+        Cmd::Search { text, min_bpm, max_bpm, plugin, db } => {
+            cmd_search(text, min_bpm, max_bpm, plugin, db)
         }
+        Cmd::Inspect { set, db } => cmd_inspect(&set, db),
+        Cmd::Stats { db } => cmd_stats(db),
     }
+}
 
+fn cmd_json(root: &Path, pretty: bool) -> Result<()> {
     let mut library = Vec::new();
-    for (dir, mut als_files) in projects {
-        als_files.sort();
-        let name = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+    for proj in discover(root)? {
         let mut sets = Vec::new();
-        for als in &als_files {
-            match parse_set(als, &dir) {
+        for als in &proj.als_files {
+            match parse_set(als, &proj.dir) {
                 Ok(snap) => {
                     summarize(&snap);
                     sets.push(snap);
                 }
-                // Lenient at the catalog level too: one corrupt file must
-                // not abort the scan.
                 Err(e) => eprintln!("  ERROR {}: {e}", als.display()),
             }
         }
-        let backups = backups(&dir)?;
-        eprintln!("{name}: {} set(s), {} backup(s)", sets.len(), backups.len());
+        eprintln!("{}: {} set(s), {} backup(s)", proj.name, sets.len(), proj.backups.len());
         library.push(ProjectSnapshot {
-            folder_path: std::path::absolute(&dir)?.to_string_lossy().into_owned(),
-            name,
+            folder_path: std::path::absolute(&proj.dir)?.to_string_lossy().into_owned(),
+            name: proj.name,
             sets,
-            backups,
+            backups: proj.backups,
         });
     }
-
-    let json = if args.pretty {
+    let json = if pretty {
         serde_json::to_string_pretty(&library)?
     } else {
         serde_json::to_string(&library)?
@@ -125,7 +114,186 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn cmd_scan(root: &Path, db: Option<PathBuf>) -> Result<()> {
+    let db = db_path(db)?;
+    let conn = indexer::open(&db)?;
+    let root_abs = std::path::absolute(root)?;
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
+
+    let (mut parsed, mut fresh, mut errors) = (0usize, 0usize, 0usize);
+    let mut seen: HashSet<String> = HashSet::new();
+
+    conn.execute_batch("BEGIN")?;
+    for proj in discover(&root_abs)? {
+        let folder = std::path::absolute(&proj.dir)?.to_string_lossy().into_owned();
+        let pid = indexer::upsert_project(&conn, &folder, &proj.name, &now)?;
+        indexer::replace_backups(&conn, pid, &proj.backups)?;
+        for als in &proj.als_files {
+            let als_abs = std::path::absolute(als)?.to_string_lossy().into_owned();
+            seen.insert(als_abs.clone());
+            let size = std::fs::metadata(als)?.len();
+            let mtime = iso_mtime(als)?;
+            if indexer::set_is_fresh(&conn, &als_abs, size, &mtime)? {
+                fresh += 1;
+                continue;
+            }
+            match parse_set(als, &proj.dir) {
+                Ok(snap) => {
+                    indexer::ingest_set(&conn, pid, &snap)?;
+                    parsed += 1;
+                    eprintln!("  indexed {}", als.display());
+                }
+                Err(e) => {
+                    errors += 1;
+                    eprintln!("  ERROR {}: {e}", als.display());
+                }
+            }
+        }
+    }
+    let removed = indexer::prune_missing(&conn, &root_abs.to_string_lossy(), &seen)?;
+    conn.execute_batch("COMMIT")?;
+
+    let st = indexer::stats(&conn)?;
+    eprintln!(
+        "scan done: {parsed} indexed, {fresh} unchanged, {errors} errors, {removed} pruned"
+    );
+    eprintln!(
+        "catalog: {} projects, {} sets, {} tracks, {} devices, {} samples, {} backups ({})",
+        st.projects, st.sets, st.tracks, st.devices, st.samples, st.backups, db.display()
+    );
+    Ok(())
+}
+
+fn cmd_search(
+    text: Option<String>,
+    min_bpm: Option<f64>,
+    max_bpm: Option<f64>,
+    plugin: Option<String>,
+    db: Option<PathBuf>,
+) -> Result<()> {
+    let conn = indexer::open(&db_path(db)?)?;
+    let hits = indexer::search(
+        &conn,
+        &indexer::SearchOpts { text, min_bpm, max_bpm, plugin },
+    )?;
+    for h in &hits {
+        let file = Path::new(&h.als_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        println!(
+            "[{:>5}] {:35.35} {:35.35} {:>6} bpm  {:>4}  {}",
+            h.set_id,
+            h.project,
+            file,
+            h.tempo.map(|t| format!("{t}")).unwrap_or_else(|| "?".into()),
+            h.time_signature.clone().unwrap_or_else(|| "?".into()),
+            h.live_version.clone().unwrap_or_default(),
+        );
+    }
+    eprintln!("{} result(s)", hits.len());
+    Ok(())
+}
+
+fn cmd_inspect(set: &str, db: Option<PathBuf>) -> Result<()> {
+    let conn = indexer::open(&db_path(db)?)?;
+    // Resolve: numeric id, exact path, then path fragment.
+    let set_id: i64 = if let Ok(id) = set.parse::<i64>() {
+        id
+    } else {
+        conn.query_row(
+            "SELECT id FROM sets WHERE als_path = ?1
+             OR als_path LIKE '%' || ?1 || '%' LIMIT 1",
+            rusqlite::params![set],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("no set matching '{set}'"))?
+    };
+
+    let mut out = serde_json::Map::new();
+    conn.query_row(
+        "SELECT s.als_path, s.live_version, s.tempo, s.time_signature, s.warnings, p.name
+         FROM sets s JOIN projects p ON p.id = s.project_id WHERE s.id = ?1",
+        rusqlite::params![set_id],
+        |r| {
+            out.insert("set_id".into(), set_id.into());
+            out.insert("project".into(), r.get::<_, String>(5)?.into());
+            out.insert("als_path".into(), r.get::<_, String>(0)?.into());
+            out.insert("live_version".into(), r.get::<_, Option<String>>(1)?.into());
+            out.insert("tempo".into(), r.get::<_, Option<f64>>(2)?.into());
+            out.insert("time_signature".into(), r.get::<_, Option<String>>(3)?.into());
+            let w: String = r.get(4)?;
+            out.insert(
+                "warnings".into(),
+                serde_json::from_str(&w).unwrap_or(serde_json::Value::Null),
+            );
+            Ok(())
+        },
+    )
+    .with_context(|| format!("no set with id {set_id}"))?;
+
+    let list = |sql: &str, cols: &[&str]| -> Result<serde_json::Value> {
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = stmt.query(rusqlite::params![set_id])?;
+        let mut arr = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mut obj = serde_json::Map::new();
+            for (i, c) in cols.iter().enumerate() {
+                let v: rusqlite::types::Value = row.get(i)?;
+                obj.insert((*c).into(), match v {
+                    rusqlite::types::Value::Null => serde_json::Value::Null,
+                    rusqlite::types::Value::Integer(n) => n.into(),
+                    rusqlite::types::Value::Real(f) => f.into(),
+                    rusqlite::types::Value::Text(s) => s.into(),
+                    rusqlite::types::Value::Blob(_) => serde_json::Value::Null,
+                });
+            }
+            arr.push(serde_json::Value::Object(obj));
+        }
+        Ok(serde_json::Value::Array(arr))
+    };
+    out.insert(
+        "tracks".into(),
+        list("SELECT idx, kind, name, color FROM tracks WHERE set_id = ?1 ORDER BY idx",
+             &["idx", "kind", "name", "color"])?,
+    );
+    out.insert(
+        "devices".into(),
+        list("SELECT track_ref, kind, name, manufacturer FROM devices WHERE set_id = ?1",
+             &["track", "kind", "name", "manufacturer"])?,
+    );
+    out.insert(
+        "samples".into(),
+        list("SELECT path, in_project, exists_on_disk FROM samples WHERE set_id = ?1",
+             &["path", "in_project", "exists_on_disk"])?,
+    );
+    out.insert(
+        "locators".into(),
+        list("SELECT name, time FROM locators WHERE set_id = ?1", &["name", "time"])?,
+    );
+    println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(out))?);
+    Ok(())
+}
+
+fn cmd_stats(db: Option<PathBuf>) -> Result<()> {
+    let db = db_path(db)?;
+    if !db.exists() {
+        bail!("no catalog at {} — run `ableton-scan scan <root>` first", db.display());
+    }
+    let conn = indexer::open(&db)?;
+    let st = indexer::stats(&conn)?;
+    println!("db:       {}", db.display());
+    println!("projects: {}", st.projects);
+    println!("sets:     {}", st.sets);
+    println!("tracks:   {}", st.tracks);
+    println!("devices:  {}", st.devices);
+    println!("samples:  {}", st.samples);
+    println!("backups:  {}", st.backups);
+    Ok(())
+}
+
 fn summarize(s: &SetSnapshot) {
+    use std::collections::BTreeMap;
     let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
     for t in &s.tracks {
         let k = match t.kind {
@@ -136,7 +304,11 @@ fn summarize(s: &SetSnapshot) {
         };
         *kinds.entry(k).or_default() += 1;
     }
-    let plugins = s.devices.iter().filter(|d| d.kind != DeviceKind::Native).count();
+    let plugins = s
+        .devices
+        .iter()
+        .filter(|d| d.kind != als_core::DeviceKind::Native)
+        .count();
     let file = Path::new(&s.als_path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

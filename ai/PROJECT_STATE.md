@@ -2,9 +2,12 @@
 
 ## Current Focus
 Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
-- [ ] Implement `indexer` crate: SQLite (rusqlite, bundled) + FTS5 over names; schema projects -> sets -> tracks/devices/samples + previews; incremental reindex keyed on mtime + content_hash.
-- [ ] CLI subcommands: `scan` (index into db), `query`/`search`, `inspect <set>`.
-- [ ] Decide index location (app data dir, e.g. ~/Library/Application Support/ableton-library/).
+- [x] Implement `indexer` crate: SQLite (rusqlite bundled) + FTS5; schema projects -> sets -> tracks/devices/samples/locators/backups; incremental via (file_size, mtime) freshness check; prune removed sets.
+- [x] CLI subcommands: `json` (oracle-compatible dump), `scan`, `search` (FTS + --min-bpm/--max-bpm/--plugin), `inspect`, `stats`.
+- [x] Index location: dirs::data_dir()/ableton-library/library.db (macOS: ~/Library/Application Support/...), `--db` override.
+- [x] Discovery moved to als-core::scan (shared with future Tauri app).
+- [ ] **NEXT (on user's Mac)**: `cargo build`; re-verify oracle (`json` subcommand now: `cargo run -p cli -- json example-project-library --pretty`); then `scan` + `search` against real library; second `scan` should report all-unchanged.
+- [ ] previews table (schema exists conceptually; add when preview discovery lands — Milestone 3).
 
 ## Milestone 1 — Metadata Extraction: ✅ DONE (2026-06-11)
 - [x] Cargo workspace: crates/als-core (parser lib), crates/cli (binary `ableton-scan` — defined in crates/cli/Cargo.toml [[bin]]).

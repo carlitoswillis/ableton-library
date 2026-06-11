@@ -10,16 +10,24 @@ Requires Rust 1.79+ (`curl https://sh.rustup.rs -sSf | sh`).
 
 ```bash
 cargo build --release
+alias ableton-scan=./target/release/ableton-scan
 
-# scan a library, human summary on stderr, JSON on stdout
+# index a library into the SQLite catalog (incremental — rescans only changed files)
+ableton-scan scan "<path to your projects root>"
+
+# query it
+ableton-scan search "korg"                       # FTS over project/set/track/device/sample names
+ableton-scan search --min-bpm 140 --max-bpm 160  # tempo range
+ableton-scan search --plugin soothe              # by device/plugin name
+ableton-scan inspect 42                          # full detail (by set id or path fragment)
+ableton-scan stats
+
+# one-shot JSON dump, no database (oracle-compatible output)
 # convention: redirect outputs into exports/ (gitignored)
-./target/release/ableton-scan "<path to your projects root>" --pretty > exports/library.json
-
-# or via cargo during development
-cargo run -p cli -- example-project-library --pretty
+ableton-scan json "<root>" --pretty > exports/library.json
 ```
 
-The binary is **`ableton-scan`** (declared in `crates/cli/Cargo.toml`; the crate itself is named `cli`).
+The binary is **`ableton-scan`** (declared in `crates/cli/Cargo.toml`; the crate itself is named `cli`). The catalog lives at `~/Library/Application Support/ableton-library/library.db` by default (`--db` overrides).
 
 ## How scanning works
 
@@ -58,9 +66,9 @@ example-project-library/    # local test fixtures (gitignored)
 `tools/reference_extract.py` is the **test oracle**: the Rust parser must produce byte-identical JSON. After any parser change:
 
 ```bash
-cargo run -p cli -- example-project-library --pretty > rust.json
-python3 tools/reference_extract.py example-project-library --pretty > py.json
-diff rust.json py.json   # must be empty
+cargo run -p cli -- json example-project-library --pretty > exports/rust.json
+python3 tools/reference_extract.py example-project-library --pretty > exports/py.json
+diff exports/rust.json exports/py.json   # must be empty
 ```
 
 Project state, decisions, and constraints are tracked in `ai/` and preserved via git — read `ai/AGENTS.md` before contributing (human or AI).

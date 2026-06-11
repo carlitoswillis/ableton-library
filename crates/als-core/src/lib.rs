@@ -5,6 +5,8 @@
 
 pub mod model;
 pub mod parser;
+pub mod scan;
 
 pub use model::*;
 pub use parser::{parse_set, ParseError};
+pub use scan::{discover, DiscoveredProject};
