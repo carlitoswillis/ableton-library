@@ -376,6 +376,17 @@ pub fn resolve_set(conn: &Connection, query: &str) -> Result<i64> {
         .with_context(|| format!("no set matching '{query}'"))?)
 }
 
+/// The stored als_path for one set.
+pub fn set_path(conn: &Connection, set_id: i64) -> Result<String> {
+    Ok(conn
+        .query_row(
+            "SELECT als_path FROM sets WHERE id = ?1",
+            params![set_id],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("no set with id {set_id}"))?)
+}
+
 /// Full stored detail for one set as JSON (shared by CLI inspect and the app).
 pub fn set_detail(conn: &Connection, set_id: i64) -> Result<serde_json::Value> {
     let mut out = serde_json::Map::new();

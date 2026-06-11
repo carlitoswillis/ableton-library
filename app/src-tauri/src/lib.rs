@@ -48,9 +48,34 @@ fn stats() -> Result<indexer::Stats, String> {
     indexer::stats(&conn).map_err(|e| e.to_string())
 }
 
+/// Open the set in Ableton Live (default .als handler), or reveal it in Finder.
+/// Only ever opens paths stored in the catalog — never arbitrary input.
+#[tauri::command(rename_all = "snake_case")]
+fn open_set(set_id: i64, reveal: bool) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let path = indexer::set_path(&conn, set_id).map_err(|e| e.to_string())?;
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("File not found on disk: {path}"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("open");
+        if reveal {
+            cmd.arg("-R");
+        }
+        cmd.arg(&path).spawn().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = reveal;
+        Err("open is only implemented on macOS so far".into())
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![search, inspect, stats])
+        .invoke_handler(tauri::generate_handler![search, inspect, stats, open_set])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

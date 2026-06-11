@@ -238,6 +238,49 @@ header h1 {
   background: var(--dim);
 }
 
+.results td.act {
+  width: 56px;
+  text-align: right;
+  padding-right: 14px;
+}
+
+.open-btn {
+  background: var(--accent);
+  color: #16161a;
+  border: none;
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  opacity: 0.92;
+}
+
+.open-btn:hover {
+  opacity: 1;
+}
+
+.open-btn.ghost {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.results tr .open-btn {
+  visibility: hidden;
+}
+
+.results tr:hover .open-btn,
+.results tr.selected .open-btn {
+  visibility: visible;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .chip.midi { background: var(--midi); }
 .chip.audio { background: var(--audio); }
 .chip.return { background: var(--return); }

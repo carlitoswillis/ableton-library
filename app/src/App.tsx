@@ -78,6 +78,15 @@ export default function App() {
     }
   };
 
+  const openInLive = async (id: number, reveal = false) => {
+    try {
+      setError(null);
+      await invoke("open_set", { set_id: id, reveal });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   return (
     <div className="app">
       <header>
@@ -143,6 +152,18 @@ export default function App() {
                   <td className="num">{h.tempo ?? "?"} bpm</td>
                   <td className="num">{h.time_signature ?? "?"}</td>
                   <td className="ver">{h.live_version?.replace("Ableton Live ", "") ?? ""}</td>
+                  <td className="act">
+                    <button
+                      className="open-btn"
+                      title="Open in Ableton Live"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openInLive(h.set_id);
+                      }}
+                    >
+                      Open
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -154,6 +175,14 @@ export default function App() {
             <div className="detail-head">
               <h2>{fileName(detail.als_path).replace(/\.als$/, "")}</h2>
               <button onClick={() => setDetail(null)}>×</button>
+            </div>
+            <div className="detail-actions">
+              <button className="open-btn" onClick={() => openInLive(detail.set_id)}>
+                Open in Live
+              </button>
+              <button className="open-btn ghost" onClick={() => openInLive(detail.set_id, true)}>
+                Reveal in Finder
+              </button>
             </div>
             <p className="meta">
               {detail.project} · {detail.tempo ?? "?"} bpm · {detail.time_signature ?? "?"} ·{" "}
