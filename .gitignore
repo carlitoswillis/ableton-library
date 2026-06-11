@@ -3,4 +3,4 @@ example-project-library
 target/
 py.json
 rust.json
-Cargo.lock
+Cargo.lockexports/
