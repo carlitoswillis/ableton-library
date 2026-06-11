@@ -307,17 +307,34 @@ pub struct SearchHit {
 }
 
 pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
-    let mut stmt = conn.prepare(
+    // With text: rank by weighted bm25 so name matches beat content matches.
+    // Column weights:        set_id, project, set, tracks, devices, samples
+    // (set/project names matter most; a plugin or sample hit still surfaces,
+    // just far below sets that match by name.)
+    let sql = if o.text.is_some() {
         "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version
-         FROM sets s JOIN projects p ON p.id = s.project_id
-         WHERE (?1 IS NULL OR s.id IN (SELECT set_id FROM search WHERE search MATCH ?1))
+         FROM search f
+         JOIN sets s ON s.id = f.set_id
+         JOIN projects p ON p.id = s.project_id
+         WHERE f.search MATCH ?1
            AND (?2 IS NULL OR s.tempo >= ?2)
            AND (?3 IS NULL OR s.tempo <= ?3)
            AND (?4 IS NULL OR EXISTS (SELECT 1 FROM devices d
                                       WHERE d.set_id = s.id
                                         AND d.name LIKE '%' || ?4 || '%'))
-         ORDER BY p.name, s.als_path",
-    )?;
+         ORDER BY bm25(f.search, 0.0, 8.0, 10.0, 4.0, 1.0, 0.5), p.name, s.als_path"
+    } else {
+        "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version
+         FROM sets s JOIN projects p ON p.id = s.project_id
+         WHERE ?1 IS NULL
+           AND (?2 IS NULL OR s.tempo >= ?2)
+           AND (?3 IS NULL OR s.tempo <= ?3)
+           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM devices d
+                                      WHERE d.set_id = s.id
+                                        AND d.name LIKE '%' || ?4 || '%'))
+         ORDER BY p.name, s.als_path"
+    };
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(
         params![o.text, o.min_bpm, o.max_bpm, o.plugin],
         |r| {

@@ -5,7 +5,8 @@ Phase: UI skeleton (Tauri) — built, awaiting first run on host (2026-06-11)
 - [x] `indexer` refactor: `set_detail`/`resolve_set` moved into lib (shared CLI + app); Serialize on SearchHit/Stats.
 - [x] `app/src-tauri`: Tauri 2 backend, commands `search`/`inspect`/`stats` (snake_case args) over the shared catalog; bundle inactive (dev-only, no icons needed yet); workspace member.
 - [x] `app/` frontend: React 18 + Vite + TS; debounced search, bpm/plugin filters, results table, detail pane (tracks/devices/samples/locators chips), partial-catalog empty state, dark theme.
-- [ ] **NEXT (on user's Mac)**: `cd app && npm install && npm run tauri dev` (first run compiles Tauri ~minutes). Fix compile/runtime issues. Verify against indexed fixtures + any real folders indexed so far.
+- [x] **VERIFIED on user's Mac** (2026-06-11): app runs after icon fix ("looks great"). Note: Tauri opens its own window; localhost:1420 in a browser has no `invoke` (expected).
+- [x] Search ranking: weighted bm25 (set/project names 10/8, tracks 4, devices 1, samples 0.5) so plugin/sample hits rank below name hits (user feedback).
 - [ ] Then (Milestone 3): previews table + discovery -> waveform peaks -> player in detail pane; later the automated Live export worker.
 
 ## Milestone 2 — Project Catalog (indexer): ✅ DONE (2026-06-11)
@@ -68,6 +69,8 @@ Phase: UI skeleton (Tauri) — built, awaiting first run on host (2026-06-11)
 - [ ] Preview archive: keep historical previews per set, potentially anchored to Backup/ timestamps (stretch; pairs with --deep backup parsing)
 - [ ] Sample `evicted` state: detect iCloud `.icloud` placeholders vs truly missing files
 - [ ] `roots` table + `rescan` subcommand (refresh all previously scanned roots)
+- [ ] UI polish pass (user verdict on skeleton: "looks great, a little bland but functional")
+- [ ] Search: consider match-source indicator in results (why did this set match?) and column-scoped queries (e.g. plugin:soothe)
 - [ ] Automatic key detection
 - [ ] Similar project search
 - [ ] Plugin inventory
