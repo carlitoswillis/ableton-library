@@ -12,7 +12,8 @@ Requires Rust 1.79+ (`curl https://sh.rustup.rs -sSf | sh`).
 cargo build --release
 
 # scan a library, human summary on stderr, JSON on stdout
-./target/release/ableton-scan "<path to your projects root>" --pretty > library.json
+# convention: redirect outputs into exports/ (gitignored)
+./target/release/ableton-scan "<path to your projects root>" --pretty > exports/library.json
 
 # or via cargo during development
 cargo run -p cli -- example-project-library --pretty
