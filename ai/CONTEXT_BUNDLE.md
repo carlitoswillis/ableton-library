@@ -1,5 +1,5 @@
 # AI Context Bundle
-Generated: Thu Jun 11 23:24:12 UTC 2026
+Generated: Thu Jun 11 23:35:14 UTC 2026
 
 ## ⚠️ Agent Navigation Guide
 1. Start with the **Current State** below to understand the focus.
@@ -103,9 +103,19 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
 
 ## Current Focus
 Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
-- [ ] Implement `indexer` crate: SQLite (rusqlite, bundled) + FTS5 over names; schema projects -> sets -> tracks/devices/samples + previews; incremental reindex keyed on mtime + content_hash.
-- [ ] CLI subcommands: `scan` (index into db), `query`/`search`, `inspect <set>`.
-- [ ] Decide index location (app data dir, e.g. ~/Library/Application Support/ableton-library/).
+- [x] Implement `indexer` crate: SQLite (rusqlite bundled) + FTS5; schema projects -> sets -> tracks/devices/samples/locators/backups; incremental via (file_size, mtime) freshness check; prune removed sets.
+- [x] CLI subcommands: `json` (oracle-compatible dump), `scan`, `search` (FTS + --min-bpm/--max-bpm/--plugin), `inspect`, `stats`.
+- [x] Index location: dirs::data_dir()/ableton-library/library.db (macOS: ~/Library/Application Support/...), `--db` override.
+- [x] Discovery moved to als-core::scan (shared with future Tauri app).
+- [x] `scan --force` (full re-ingest, e.g. after parser upgrades) + db stamped with PRAGMA user_version (SCHEMA_VERSION=1); mismatched dbs refused with rebuild instructions. Catalog is always fully rebuildable from .als files.
+- [x] **VERIFIED on user's Mac** (2026-06-11): build clean, oracle diff clean, scan/search working ("everything went great").
+- [ ] previews table (schema exists conceptually; add when preview discovery lands — Milestone 3).
+
+### Library indexing strategy: INCREMENTAL ADOPTION (decided 2026-06-11)
+- User's full library is extensive + iCloud-hosted; a full first scan would force mass downloads (eviction) and take very long. **Full-library scan is deliberately deferred — do not push for it.**
+- Instead: scan subfolders piecemeal (per year / per artist) as needed. This is SAFE BY DESIGN: `prune_missing` is root-scoped (only prunes sets under the root being scanned), so scans of different roots **accumulate** in one catalog without clobbering each other.
+- Implication for all future features: never assume the catalog is complete. UI and queries must treat the catalog as "what's been indexed so far".
+- Possible future ergonomics (backlog): `roots` table remembering scanned roots -> `ableton-scan rescan` refreshes all known roots; per-root scan timestamps.
 
 ## Milestone 1 — Metadata Extraction: ✅ DONE (2026-06-11)
 - [x] Cargo workspace: crates/als-core (parser lib), crates/cli (binary `ableton-scan` — defined in crates/cli/Cargo.toml [[bin]]).
@@ -151,6 +161,7 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 - [ ] Automated Live export worker (second Live install + UI automation; see ARCHITECTURE.md Preview Service)
 - [ ] Preview archive: keep historical previews per set, potentially anchored to Backup/ timestamps (stretch; pairs with --deep backup parsing)
 - [ ] Sample `evicted` state: detect iCloud `.icloud` placeholders vs truly missing files
+- [ ] `roots` table + `rescan` subcommand (refresh all previously scanned roots)
 - [ ] Automatic key detection
 - [ ] Similar project search
 - [ ] Plugin inventory
@@ -171,6 +182,7 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 ./crates
 ./crates/als-core
 ./crates/cli
+./crates/indexer
 ./example-project-library
 ./example-project-library/big guy Project
 ./example-project-library/522 idea Project
@@ -197,113 +209,113 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 
 ## 5. Recent Git Changes (Summary)
 ```text
+868a0f9 Add scan --force + schema versioning (PRAGMA user_version); refuse mismatched catalogs
+71e95d9 M2: indexer crate (SQLite+FTS5, incremental, prune) + CLI subcommands
+dbdcf2d Context audit: close fixture-version gap, retire proven risks, move Assumption C, log repo conventions; regenerate CONTEXT_BUNDLE
 f7e57bd update clock
 884b891 gitignore: normalize (user edit); untrack Cargo.lock per user preference
-64156ad Track Cargo.lock (reproducible builds for binary workspace)
-7bb3100 README: document exports/ convention
-3a906e1 Convention: scan outputs live in exports/ (gitignored); SQLite will be canonical store
 ```
 
 ## 6. Active Diff
 ```diff
-diff --git a/ai/CONTEXT_BUNDLE.md b/ai/CONTEXT_BUNDLE.md
-index 0480fcb..994b09e 100644
---- a/ai/CONTEXT_BUNDLE.md
-+++ b/ai/CONTEXT_BUNDLE.md
-@@ -1,5 +1,5 @@
- # AI Context Bundle
--Generated: Thu Jun 11 15:27:04 PDT 2026
-+Generated: Thu Jun 11 23:24:12 UTC 2026
+diff --git a/Cargo.lock b/Cargo.lock
+index 1225224..60dbfa8 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -8,6 +8,18 @@ version = "2.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
  
- ## ⚠️ Agent Navigation Guide
- 1. Start with the **Current State** below to understand the focus.
-@@ -21,6 +21,8 @@ PURPOSE: This is the authoritative rulebook for AI assistants. It defines the 'h
-   - **Frontend**: React, Vue, or Desktop Native (Electron, Tauri).
- 
- ## Architecture Constraints
-+- **No Ableton SDK dependency**: User runs Live 11; the Extensions SDK (Live 12 Suite beta only) is off the table. Filesystem-first is the strategy, not a fallback.
-+- **Version tolerance (backward + forward)**: Parser must handle .als files from older Live versions (9/10/11) and newer ones (12+). Extract leniently — skip unknown elements, never hard-fail on schema drift, record the Live version (Creator attribute) per set.
- - **API/Service Structure**: Modular service for metadata and preview management.
- - **Database/Persistence**: Local persistence for indexing and snapshots.
- - **Markdown Persistence**: All state must be tracked in `/ai`.
-@@ -48,31 +50,47 @@ PURPOSE: Technical system design and data flow of the Ableton Library applicatio
- ## Overview
- Ableton Library is a metadata and preview indexing system for Ableton projects, allowing users to browse and search their library without opening Ableton Live.
- 
-+## Stack Decision (2026-06-11)
-+**Rust core + Tauri 2 desktop shell + React/TS frontend + SQLite.** CLI-first: the extraction core and indexer ship as a Rust CLI and are validated against the real library before any UI is built.
++[[package]]
++name = "ahash"
++version = "0.8.12"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
++dependencies = [
++ "cfg-if",
++ "once_cell",
++ "version_check",
++ "zerocopy",
++]
 +
-+### Repository Layout (Cargo workspace)
-+```
-+crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot (serde)  [BUILT, verified vs oracle]
-+crates/cli/        # bin: `ableton-scan` (clap + walkdir)  [BUILT, verified vs oracle]
-+crates/indexer/    # lib: SQLite (rusqlite + FTS5), incremental scan (mtime+hash)  [NEXT]
-+tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
-+app/               # Tauri 2 + React/TS (Milestone 3+); later: symphonia for waveform peaks
-+```
-+
- ## System Components
+ [[package]]
+ name = "als-core"
+ version = "0.1.0"
+@@ -18,6 +30,7 @@ dependencies = [
+  "serde",
+  "sha2",
+  "thiserror",
++ "walkdir",
+ ]
  
--### 1. Filesystem Scanner (.als + project folders)
-+### 1. Filesystem Scanner — `als-core` (Rust)
- - **Purpose**: Extract project information from Live Sets and folders.
--- **Status**: Pivot from Extension-based to Filesystem-first.
--- **Responsibilities**: Metadata extraction, XML/Gzip parsing (.als), and normalization.
--
--### 2. Metadata & Indexing Service
--- **Purpose**: Persist and query project information.
--- **Options**: 
--  - Relational (SQLite) for structured queries.
--  - Document-based (JSON/Embedded DB) for flexibility.
--- **Responsibilities**: Receive metadata, normalize records, store project snapshots.
--
--### 3. Preview Service
--- **Purpose**: Associate audio previews with projects.
--- **Responsibilities**: Detect preview files, store preview metadata, generate/cache waveform data.
--
--### 4. User Interface
--- **Purpose**: Browse and search projects.
--- **Options**: Web-based (React/Vite), Desktop-native (Tauri/Rust), or CLI.
-+- **Approach**: Streaming XML parse (never full DOM — .als can decompress to 100s of MB).
-+- **Version tolerance**: No Ableton SDK (user on Live 11; SDK is Live 12 Suite beta only). Parse leniently across Live versions, backward (9/10/11) and forward (12+): ignore unknown elements, tolerate missing ones, record Creator/version per set, and emit per-field extraction warnings instead of failing the whole file.
-+- **Extracts**: Live version, tempo/time sig, tracks (type/name/color), clip names, device/plugin names, sample file references.
-+- **Output**: Normalized ProjectSnapshot JSON per set.
-+
-+### 2. Metadata & Indexing Service — `indexer` (Rust + SQLite)
-+- **Decision**: SQLite with FTS5 (over names) for search.
-+- **Model**: A project *folder* contains one or more `.als` *sets*. Tables: projects -> sets (tempo, version, hash, mtime) -> tracks, plugins, samples (path + missing flag), previews.
-+- **Incremental**: Reindex keyed on mtime + content hash. Index lives in app data dir, never inside user project folders.
-+
-+### 3. Preview Service (pluggable source interface)
-+- **Pipeline**: watcher sees .als save -> debounced job queue -> preview *source* resolves audio -> peaks cached -> catalog updated.
-+- **Constraint**: Reimplementing Live's render engine is ruled out permanently. Live itself is the only correct renderer.
-+- **Sources (priority)**:
-+  - (a) **Discovery** (MVP): user-exported renders in/near project folder; Live 12 set previews in `Ableton Project Info/` (verify); frozen/processed audio fallback.
-+  - (b) **Automated Live export** (flagship, post-catalog): worker launches a *second* Live install with the set, drives File -> Export via macOS UI automation (proven previously by owner). Constraints: serialize one render at a time; debounce save bursts; handle dialogs (missing samples, version prompts); UI scripting steals focus so make it opt-in/idle-scheduled; treat Live as flaky (timeouts, retry once, mark "render failed" rather than wedging queue). Isolated component — can start as a standalone script consuming jobs and emitting audio files.
-+- **Previews are per-SET, not per-project** (projects can hold multiple distinct .als, e.g. "wanna be your" + "wanna be your2"). Discovery must match found renders to sets by filename similarity (normalized prefix match vs set name); ambiguous matches attach at project level with low confidence. The export worker has no ambiguity (it knows which set it rendered).
-+- **Waveforms**: Decode (symphonia), precompute peaks once, cache keyed by set hash.
-+
-+### 4. User Interface — Tauri 2 (Milestone 2+)
-+- **Decision**: Tauri 2 shell, React/TS frontend; core logic lives in the Tauri Rust backend (no sidecar). Audio streamed to webview via asset protocol.
- - **Views**: Library View (Search/Filters), Project Detail View (Metadata/Tracks/Player).
+ [[package]]
+@@ -65,7 +78,7 @@ version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
+ dependencies = [
+- "windows-sys",
++ "windows-sys 0.61.2",
+ ]
  
- ## Data Flow
--Filesystem (.als) -> Extraction Logic -> Indexing Service -> Local Storage -> UI Layer
-+Filesystem (.als) -> als-core (streaming parse) -> indexer (SQLite) -> Tauri commands -> React UI
+ [[package]]
+@@ -76,7 +89,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
+ dependencies = [
+  "anstyle",
+  "once_cell_polyfill",
+- "windows-sys",
++ "windows-sys 0.61.2",
+ ]
  
- ## AI Workspace Substrate
- This repository uses an AI-assisted engineering substrate located in `/ai`
-@@ -84,42 +102,94 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
- # Project State
+ [[package]]
+@@ -91,6 +104,12 @@ version = "1.5.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
  
- ## Current Focus
--Phase: Planning (2026-06-11)
--- [ ] Pivot to Filesystem-first architecture (Live 11+ support).
--- [ ] Research/Select technology stack (Go vs Rust vs Node for extraction).
--- [ ] Implement Metadata Extraction MVP.
-+Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
-+- [ ] Implement `indexer` crate: SQLite (rusqlite, bundled) + FTS5 over names; schema projects -> sets -> tracks/devices/samples + previews; incremental reindex keyed on mtime + content_hash.
-+- [ ] CLI subcommands: `scan` (index into db), `query`/`search`, `inspect <set>`.
-+- [ ] Decide index location (app data dir, e.g. ~/Library/Application Support/ableton-library/).
++[[package]]
++name = "bitflags"
++version = "2.13.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
++
+ [[package]]
+ name = "block-buffer"
+ version = "0.10.4"
+@@ -183,9 +202,10 @@ dependencies = [
+  "anyhow",
+  "chrono",
+  "clap",
+- "serde",
++ "dirs",
++ "indexer",
++ "rusqlite",
+  "serde_json",
+- "walkdir",
+ ]
+ 
+ [[package]]
+@@ -238,6 +258,39 @@ dependencies = [
+  "crypto-common",
+ ]
+ 
++[[package]]
++name = "dirs"
++version = "5.0.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "44c45a9d03d6676652bcb5e724c7e988de1acad23a711b5217ab9cbecbec2225"
++dependencies = [
++ "dirs-sys",
++]
++
++[[package]]
++name = "dirs-sys"
++version = "0.4.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "520f05a5cbd335fae5a99ff7a6ab8627577660ee5cfd6a94a6a929b52ff0321c"
++dependencies = [
++ "libc",
++ "option-ext",
++ "redox_users",
++ "windows-sys 0.48.0",
++]
 +
 ```

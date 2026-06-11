@@ -7,8 +7,14 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 - [x] Index location: dirs::data_dir()/ableton-library/library.db (macOS: ~/Library/Application Support/...), `--db` override.
 - [x] Discovery moved to als-core::scan (shared with future Tauri app).
 - [x] `scan --force` (full re-ingest, e.g. after parser upgrades) + db stamped with PRAGMA user_version (SCHEMA_VERSION=1); mismatched dbs refused with rebuild instructions. Catalog is always fully rebuildable from .als files.
-- [ ] **NEXT (on user's Mac)**: `cargo build`; re-verify oracle (`json` subcommand now: `cargo run -p cli -- json example-project-library --pretty`); then `scan` + `search` against real library; second `scan` should report all-unchanged.
+- [x] **VERIFIED on user's Mac** (2026-06-11): build clean, oracle diff clean, scan/search working ("everything went great").
 - [ ] previews table (schema exists conceptually; add when preview discovery lands — Milestone 3).
+
+### Library indexing strategy: INCREMENTAL ADOPTION (decided 2026-06-11)
+- User's full library is extensive + iCloud-hosted; a full first scan would force mass downloads (eviction) and take very long. **Full-library scan is deliberately deferred — do not push for it.**
+- Instead: scan subfolders piecemeal (per year / per artist) as needed. This is SAFE BY DESIGN: `prune_missing` is root-scoped (only prunes sets under the root being scanned), so scans of different roots **accumulate** in one catalog without clobbering each other.
+- Implication for all future features: never assume the catalog is complete. UI and queries must treat the catalog as "what's been indexed so far".
+- Possible future ergonomics (backlog): `roots` table remembering scanned roots -> `ableton-scan rescan` refreshes all known roots; per-root scan timestamps.
 
 ## Milestone 1 — Metadata Extraction: ✅ DONE (2026-06-11)
 - [x] Cargo workspace: crates/als-core (parser lib), crates/cli (binary `ableton-scan` — defined in crates/cli/Cargo.toml [[bin]]).
@@ -54,6 +60,7 @@ Phase: Milestone 2 — Project Catalog (indexer) (2026-06-11)
 - [ ] Automated Live export worker (second Live install + UI automation; see ARCHITECTURE.md Preview Service)
 - [ ] Preview archive: keep historical previews per set, potentially anchored to Backup/ timestamps (stretch; pairs with --deep backup parsing)
 - [ ] Sample `evicted` state: detect iCloud `.icloud` placeholders vs truly missing files
+- [ ] `roots` table + `rescan` subcommand (refresh all previously scanned roots)
 - [ ] Automatic key detection
 - [ ] Similar project search
 - [ ] Plugin inventory
