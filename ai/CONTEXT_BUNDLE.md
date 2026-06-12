@@ -1,5 +1,5 @@
 # AI Context Bundle
-Generated: Fri Jun 12 00:29:35 UTC 2026
+Generated: Fri Jun 12 00:49:27 UTC 2026
 
 ## ⚠️ Agent Navigation Guide
 1. Start with the **Current State** below to understand the focus.
@@ -104,6 +104,13 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
 ## 3. Project State (PROJECT_STATE.md)
 # Project State
 
+## ⚡ HANDOFF SNAPSHOT (2026-06-11, end of session — read this first)
+- **Where things stand**: M1 (extraction) + M2 (catalog) + UI skeleton DONE and verified on the user's Mac. M3 previews: fully built (discovery, matching, peaks, player bar, in-app folder-picker scanning), but **awaiting user verification** of (a) the async/spawn_blocking UI-freeze fix (beach ball occurred on first in-app scan; fix committed 72ae0a1, not yet re-tested) and (b) the matcher against real bounces (user's plan: `reset --yes`, bounce current-year tracks to one folder, scan 2026 projects in-app or via CLI, then `previews <bounce folder> --verbose`).
+- **Working style**: user is NOT writing Rust (decided after the fact — AI writes all code, user compiles/tests on their Mac and gives product feedback). The sandbox cannot run cargo (network allowlist); ALL Rust verification happens on the user's machine. Keep tools/reference_extract.py in sync with any als-core parser change.
+- **Cadence that works**: user gives product feedback/requests -> implement -> commit with descriptive message -> user pulls, builds, tests -> log results + decisions here. Update these context files and commit at every meaningful step (project instruction).
+- **Run commands**: CLI `cargo run -p cli -- <subcommand>`; app `cd app && npm install && npm run tauri dev`.
+- **Next likely work**: live scan progress via Tauri events; detail-pane preview list (switch primary); `roots` table + rescan; iCloud `evicted` sample state; M4 in-app export worker (the flagship: drives a second Live install via UI automation to render previews overnight).
+
 ## Current Focus
 Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verification) (2026-06-11)
 - **Key user decision**: renders are SCATTERED across the computer (old consolidation script defunct) — discovery must NOT rely on project folders. It hunts user-chosen roots (Desktop, Downloads, ...) and name-matches against the catalog. Files never moved, only referenced.
@@ -118,6 +125,7 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 - [x] In-folder harvest (user request): `scan` auto-harvests renders found inside project folders (folder placement = signal): name match -> set (+0.05 bonus); no name match in single-set project -> 0.7; else project-level. `--no-previews` opts out (iCloud). Harvest runs post-commit so sample cross-check sees the just-indexed catalog.
 - [x] **ARCHITECTURE: crates/ops extracted** (user wants in-app scanning; "CLI for dev, app for users"): scan_library/hunt_renders/attach moved out of the cli bin into shared ops crate. Layering: als-core+previews -> indexer (storage) -> ops (workflows) -> cli/app (frontends). CLI commands are now thin wrappers.
 - [x] In-app scanning: "Scan folder…" header button -> native picker (tauri-plugin-dialog, dialog:default capability) -> scan_folder command (ops::scan_library incl. harvest) -> stats+results refresh + summary message. NOTE: requires `npm install` (new plugin-dialog dep); per-file progress not yet surfaced (future: Tauri events + progress UI).
+- [x] **GOTCHA (beach-ball incident)**: sync Tauri commands run on the MAIN thread -> scan froze the window. ALL commands now async; scan_folder additionally wraps work in tauri::async_runtime::spawn_blocking. Rule going forward: any command touching disk/db is async; anything heavy goes in spawn_blocking.
 - [ ] **NEXT (user's test plan)**: dump db (`ableton-scan reset --yes`), bounce some current-year tracks into one folder, `scan` the matching projects + `previews` that folder, evaluate match quality from a controlled sample. NO full-system hunt (user explicitly declined).
 - [ ] Later in M3: previews in detail pane (list all, switch primary), historical preview archive, in-app "hunt for previews" UI.
 - [ ] M4: in-app export worker (second Live install + UI automation queue).
@@ -251,113 +259,113 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 
 ## 5. Recent Git Changes (Summary)
 ```text
+9576e69 cargo lock update
+72ae0a1 Fix UI freeze: all Tauri commands async, scan in spawn_blocking (sync commands run on main thread)
+c92f1aa In-app scanning: ops crate + native folder picker
 ac7b44d scan auto-harvests in-folder renders as previews (--no-previews opts out); folder placement boosts confidence
 fdced93 Sample safety: discovery cross-checks catalog samples table; known sample paths never attach as previews
-9ede958 Matcher: keep bpm/key/prod tokens as identity (normalize form, not content) per user; add reset subcommand
-d20f14e M3 (discovery half): scattered-render hunt, name matcher, peaks, player bar
-e53f74b Open in Live / Reveal in Finder: open_set command (catalog paths only), row hover button + detail actions
 ```
 
 ## 6. Active Diff
 ```diff
-diff --git a/Cargo.lock b/Cargo.lock
-index 44f8a4f..1279cfb 100644
---- a/Cargo.lock
-+++ b/Cargo.lock
-@@ -129,10 +129,12 @@ dependencies = [
-  "als-core",
-  "dirs 5.0.1",
-  "indexer",
-+ "ops",
-  "serde",
-  "serde_json",
-  "tauri",
-  "tauri-build",
-+ "tauri-plugin-dialog",
- ]
+diff --git a/ai/CONTEXT_BUNDLE.md b/ai/CONTEXT_BUNDLE.md
+index 0fdc921..0b94c06 100644
+--- a/ai/CONTEXT_BUNDLE.md
++++ b/ai/CONTEXT_BUNDLE.md
+@@ -1,5 +1,5 @@
+ # AI Context Bundle
+-Generated: Fri Jun 12 00:29:35 UTC 2026
++Generated: Fri Jun 12 00:49:27 UTC 2026
  
- [[package]]
-@@ -463,12 +465,10 @@ version = "0.1.0"
- dependencies = [
-  "als-core",
-  "anyhow",
-- "chrono",
-  "clap",
-  "dirs 5.0.1",
-  "indexer",
-- "previews",
-- "rusqlite",
-+ "ops",
-  "serde_json",
- ]
+ ## ⚠️ Agent Navigation Guide
+ 1. Start with the **Current State** below to understand the focus.
+@@ -104,6 +104,13 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
+ ## 3. Project State (PROJECT_STATE.md)
+ # Project State
  
-@@ -2225,6 +2225,7 @@ checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
- dependencies = [
-  "bitflags 2.13.0",
-  "block2",
-+ "libc",
-  "objc2",
-  "objc2-core-foundation",
- ]
-@@ -2309,6 +2310,19 @@ version = "1.70.2"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
- 
-+[[package]]
-+name = "ops"
-+version = "0.1.0"
-+dependencies = [
-+ "als-core",
-+ "anyhow",
-+ "chrono",
-+ "indexer",
-+ "previews",
-+ "rusqlite",
-+ "serde",
-+]
++## ⚡ HANDOFF SNAPSHOT (2026-06-11, end of session — read this first)
++- **Where things stand**: M1 (extraction) + M2 (catalog) + UI skeleton DONE and verified on the user's Mac. M3 previews: fully built (discovery, matching, peaks, player bar, in-app folder-picker scanning), but **awaiting user verification** of (a) the async/spawn_blocking UI-freeze fix (beach ball occurred on first in-app scan; fix committed 72ae0a1, not yet re-tested) and (b) the matcher against real bounces (user's plan: `reset --yes`, bounce current-year tracks to one folder, scan 2026 projects in-app or via CLI, then `previews <bounce folder> --verbose`).
++- **Working style**: user is NOT writing Rust (decided after the fact — AI writes all code, user compiles/tests on their Mac and gives product feedback). The sandbox cannot run cargo (network allowlist); ALL Rust verification happens on the user's machine. Keep tools/reference_extract.py in sync with any als-core parser change.
++- **Cadence that works**: user gives product feedback/requests -> implement -> commit with descriptive message -> user pulls, builds, tests -> log results + decisions here. Update these context files and commit at every meaningful step (project instruction).
++- **Run commands**: CLI `cargo run -p cli -- <subcommand>`; app `cd app && npm install && npm run tauri dev`.
++- **Next likely work**: live scan progress via Tauri events; detail-pane preview list (switch primary); `roots` table + rescan; iCloud `evicted` sample state; M4 in-app export worker (the flagship: drives a second Live install via UI automation to render previews overnight).
 +
- [[package]]
- name = "option-ext"
- version = "0.2.0"
-@@ -2735,6 +2749,30 @@ dependencies = [
-  "web-sys",
- ]
+ ## Current Focus
+ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verification) (2026-06-11)
+ - **Key user decision**: renders are SCATTERED across the computer (old consolidation script defunct) — discovery must NOT rely on project folders. It hunts user-chosen roots (Desktop, Downloads, ...) and name-matches against the catalog. Files never moved, only referenced.
+@@ -118,6 +125,7 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
+ - [x] In-folder harvest (user request): `scan` auto-harvests renders found inside project folders (folder placement = signal): name match -> set (+0.05 bonus); no name match in single-set project -> 0.7; else project-level. `--no-previews` opts out (iCloud). Harvest runs post-commit so sample cross-check sees the just-indexed catalog.
+ - [x] **ARCHITECTURE: crates/ops extracted** (user wants in-app scanning; "CLI for dev, app for users"): scan_library/hunt_renders/attach moved out of the cli bin into shared ops crate. Layering: als-core+previews -> indexer (storage) -> ops (workflows) -> cli/app (frontends). CLI commands are now thin wrappers.
+ - [x] In-app scanning: "Scan folder…" header button -> native picker (tauri-plugin-dialog, dialog:default capability) -> scan_folder command (ops::scan_library incl. harvest) -> stats+results refresh + summary message. NOTE: requires `npm install` (new plugin-dialog dep); per-file progress not yet surfaced (future: Tauri events + progress UI).
++- [x] **GOTCHA (beach-ball incident)**: sync Tauri commands run on the MAIN thread -> scan froze the window. ALL commands now async; scan_folder additionally wraps work in tauri::async_runtime::spawn_blocking. Rule going forward: any command touching disk/db is async; anything heavy goes in spawn_blocking.
+ - [ ] **NEXT (user's test plan)**: dump db (`ableton-scan reset --yes`), bounce some current-year tracks into one folder, `scan` the matching projects + `previews` that folder, evaluate match quality from a controlled sample. NO full-system hunt (user explicitly declined).
+ - [ ] Later in M3: previews in detail pane (list all, switch primary), historical preview archive, in-app "hunt for previews" UI.
+ - [ ] M4: in-app export worker (second Live install + UI automation queue).
+@@ -251,113 +259,12 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
  
-+[[package]]
-+name = "rfd"
-+version = "0.16.0"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "a15ad77d9e70a92437d8f74c35d99b4e4691128df018833e99f90bcd36152672"
-+dependencies = [
-+ "block2",
-+ "dispatch2",
-+ "glib-sys",
-+ "gobject-sys",
-+ "gtk-sys",
-+ "js-sys",
-+ "log",
-+ "objc2",
-+ "objc2-app-kit",
-+ "objc2-core-foundation",
-+ "objc2-foundation",
-+ "raw-window-handle",
-+ "wasm-bindgen",
-+ "wasm-bindgen-futures",
-+ "web-sys",
-+ "windows-sys 0.60.2",
-+]
-+
- [[package]]
- name = "rusqlite"
- version = "0.32.1"
-@@ -3566,6 +3604,64 @@ dependencies = [
-  "tauri-utils",
- ]
+ ## 5. Recent Git Changes (Summary)
+ ```text
++9576e69 cargo lock update
++72ae0a1 Fix UI freeze: all Tauri commands async, scan in spawn_blocking (sync commands run on main thread)
++c92f1aa In-app scanning: ops crate + native folder picker
+ ac7b44d scan auto-harvests in-folder renders as previews (--no-previews opts out); folder placement boosts confidence
+ fdced93 Sample safety: discovery cross-checks catalog samples table; known sample paths never attach as previews
+-9ede958 Matcher: keep bpm/key/prod tokens as identity (normalize form, not content) per user; add reset subcommand
+-d20f14e M3 (discovery half): scattered-render hunt, name matcher, peaks, player bar
+-e53f74b Open in Live / Reveal in Finder: open_set command (catalog paths only), row hover button + detail actions
+ ```
  
-+[[package]]
-+name = "tauri-plugin"
-+version = "2.6.2"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "e126abc9e84e35cdfd01596140a73a1850cdb0df0a23acf0185776c30b469a6e"
-+dependencies = [
+ ## 6. Active Diff
+ ```diff
+-diff --git a/Cargo.lock b/Cargo.lock
+-index 44f8a4f..1279cfb 100644
+---- a/Cargo.lock
+-+++ b/Cargo.lock
+-@@ -129,10 +129,12 @@ dependencies = [
+-  "als-core",
+-  "dirs 5.0.1",
+-  "indexer",
+-+ "ops",
+-  "serde",
+-  "serde_json",
+-  "tauri",
+-  "tauri-build",
+-+ "tauri-plugin-dialog",
+- ]
+- 
+- [[package]]
+-@@ -463,12 +465,10 @@ version = "0.1.0"
+- dependencies = [
+-  "als-core",
+-  "anyhow",
+-- "chrono",
+-  "clap",
+-  "dirs 5.0.1",
+-  "indexer",
+-- "previews",
+-- "rusqlite",
+-+ "ops",
+-  "serde_json",
+- ]
+- 
+-@@ -2225,6 +2225,7 @@ checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
+- dependencies = [
+-  "bitflags 2.13.0",
+-  "block2",
+-+ "libc",
+-  "objc2",
+-  "objc2-core-foundation",
+- ]
+-@@ -2309,6 +2310,19 @@ version = "1.70.2"
+- source = "registry+https://github.com/rust-lang/crates.io-index"
+- checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+- 
+-+[[package]]
+-+name = "ops"
+-+version = "0.1.0"
+-+dependencies = [
+-+ "als-core",
+-+ "anyhow",
+-+ "chrono",
+-+ "indexer",
 ```

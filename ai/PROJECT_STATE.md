@@ -1,5 +1,12 @@
 # Project State
 
+## ⚡ HANDOFF SNAPSHOT (2026-06-11, end of session — read this first)
+- **Where things stand**: M1 (extraction) + M2 (catalog) + UI skeleton DONE and verified on the user's Mac. M3 previews: fully built (discovery, matching, peaks, player bar, in-app folder-picker scanning), but **awaiting user verification** of (a) the async/spawn_blocking UI-freeze fix (beach ball occurred on first in-app scan; fix committed 72ae0a1, not yet re-tested) and (b) the matcher against real bounces (user's plan: `reset --yes`, bounce current-year tracks to one folder, scan 2026 projects in-app or via CLI, then `previews <bounce folder> --verbose`).
+- **Working style**: user is NOT writing Rust (decided after the fact — AI writes all code, user compiles/tests on their Mac and gives product feedback). The sandbox cannot run cargo (network allowlist); ALL Rust verification happens on the user's machine. Keep tools/reference_extract.py in sync with any als-core parser change.
+- **Cadence that works**: user gives product feedback/requests -> implement -> commit with descriptive message -> user pulls, builds, tests -> log results + decisions here. Update these context files and commit at every meaningful step (project instruction).
+- **Run commands**: CLI `cargo run -p cli -- <subcommand>`; app `cd app && npm install && npm run tauri dev`.
+- **Next likely work**: live scan progress via Tauri events; detail-pane preview list (switch primary); `roots` table + rescan; iCloud `evicted` sample state; M4 in-app export worker (the flagship: drives a second Live install via UI automation to render previews overnight).
+
 ## Current Focus
 Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verification) (2026-06-11)
 - **Key user decision**: renders are SCATTERED across the computer (old consolidation script defunct) — discovery must NOT rely on project folders. It hunts user-chosen roots (Desktop, Downloads, ...) and name-matches against the catalog. Files never moved, only referenced.
