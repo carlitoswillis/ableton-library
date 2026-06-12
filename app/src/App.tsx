@@ -125,6 +125,7 @@ export default function App() {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [selectedSuggestions, setSelectedSuggestions] = useState<string[]>([]);
+  const [linkProgress, setLinkProgress] = useState<[number, number] | null>(null);
 
 
   const runSearch = useCallback(async () => {
@@ -337,7 +338,7 @@ export default function App() {
         setLiveStats((prev) => ({ ...prev, indexed: prev.indexed + 1 }));
       } else if (line.startsWith("ERROR")) {
         setLiveStats((prev) => ({ ...prev, errors: prev.errors + 1 }));
-      } else if (line.startsWith("preview")) {
+      } else if (line.startsWith("preview") || line.startsWith("linked")) {
         setLiveStats((prev) => ({ ...prev, previews: prev.previews + 1 }));
       }
     }).then((unsub) => {
@@ -534,8 +535,10 @@ export default function App() {
     });
   };
 
+  // Bulk link runs as a background job exactly like scan_folder /
+  // bulk_preview_scan: progress modal + banner, shared Cancel button.
   const linkSelectedSuggestions = async () => {
-    if (selectedSuggestions.length === 0) return;
+    if (selectedSuggestions.length === 0 || linkProgress || scanning) return;
     try {
       setError(null);
       const matches = selectedSuggestions.map((key) => {
@@ -544,15 +547,59 @@ export default function App() {
         const audioPath = key.substring(firstColonIdx + 1);
         return [setId, audioPath];
       });
-      await invoke("link_watch_suggestions", { matches });
+      setScanLogs([]);
+      setLiveStats({ indexed: 0, unchanged: 0, previews: 0, errors: 0 });
+      setShowProgressModal(true);
+      setScanning(true);
+      setScanMsg(null);
+      setLinkProgress([0, matches.length]);
+      const linked = await invoke<number>("link_watch_suggestions", { matches });
       setSelectedSuggestions([]);
       refreshSuggestions();
       runSearch();
       refreshStats();
+      setScanMsg(`${linked} of ${matches.length} bounce${matches.length === 1 ? "" : "s"} linked`);
     } catch (e) {
-      setError(String(e));
+      const msg = String(e);
+      if (msg.includes("cancelled")) {
+        setScanMsg("Link cancelled");
+        refreshSuggestions();
+        runSearch();
+        refreshStats();
+      } else {
+        setError(msg);
+      }
+      setShowProgressModal(false);
+    } finally {
+      setScanning(false);
+      setLinkProgress(null);
     }
   };
+
+  // Live progress while a bulk link runs.
+  useEffect(() => {
+    let active = true;
+    let unsubscribed = false;
+    let unlistenFn: (() => void) | null = null;
+
+    listen<[number, number]>("link-progress", (event) => {
+      if (!active) return;
+      setLinkProgress(event.payload);
+    }).then((unsub) => {
+      unlistenFn = unsub;
+      if (unsubscribed) {
+        unsub();
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubscribed = true;
+      if (unlistenFn) {
+        unlistenFn();
+      }
+    };
+  }, []);
 
   const playSuggestionTrack = (s: Suggestion) => {
     setTrack({
@@ -1371,13 +1418,16 @@ export default function App() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <h3>Suggested Bounce Matches</h3>
                 <div style={{ display: "flex", gap: "8px" }}>
-                  {selectedSuggestions.length > 0 && (
+                  {(selectedSuggestions.length > 0 || linkProgress) && (
                     <button
                       className="open-btn"
                       style={{ padding: "4px 8px", fontSize: "11px" }}
                       onClick={linkSelectedSuggestions}
+                      disabled={!!linkProgress}
                     >
-                      Link Selected ({selectedSuggestions.length})
+                      {linkProgress
+                        ? `Linking ${linkProgress[0]}/${linkProgress[1]}…`
+                        : `Link Selected (${selectedSuggestions.length})`}
                     </button>
                   )}
                   <button

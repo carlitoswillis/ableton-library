@@ -481,99 +481,63 @@ async fn ignore_watch_suggestion(set_id: i64, audio_path: String) -> Result<(), 
     indexer::add_ignored_match(&conn, set_id, &audio_path).map_err(|e| e.to_string())
 }
 
+/// Link one suggested bounce match. spawn_blocking: moves a file (possibly
+/// iCloud) and decodes audio — never block the async runtime with that.
 #[tauri::command(rename_all = "snake_case")]
 async fn link_watch_suggestion(set_id: i64, audio_path: String) -> Result<(), String> {
-    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
-    
-    // 1. Get als_path of the set
-    let als_path = indexer::set_path(&conn, set_id).map_err(|e| e.to_string())?;
-    let als_path = std::path::Path::new(&als_path);
-    
-    let set_stem = als_path
-        .file_stem()
-        .map(|x| x.to_string_lossy().into_owned())
-        .ok_or_else(|| "Invalid set path".to_string())?;
-        
-    let project_dir = als_path
-        .parent()
-        .ok_or_else(|| "No parent directory for set path".to_string())?;
-
-    // 2. Determine target path (retaining extension of source audio file)
-    let src_path = std::path::Path::new(&audio_path);
-    if !src_path.exists() {
-        return Err(format!("Source audio file does not exist: {}", audio_path));
-    }
-    
-    let ext = src_path
-        .extension()
-        .map(|x| x.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "wav".to_string());
-        
-    let target_path = project_dir.join(format!("{}.{}", set_stem, ext));
-
-    // 3. Move the file from src_path to target_path (handling cross-device boundaries)
-    if let Some(parent) = target_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create project subdirectories: {e}"))?;
-    }
-    
-    if std::fs::rename(src_path, &target_path).is_err() {
-        // Fall back to copy + delete if rename fails
-        std::fs::copy(src_path, &target_path)
-            .map_err(|e| format!("Failed to copy audio file to project: {e}"))?;
-        let _ = std::fs::remove_file(src_path);
-    }
-
-    // 4. Attach the new target path to the set
-    ops::attach(&conn, set_id, &target_path).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+        let mut last_err: Option<String> = None;
+        let mut log = |line: String| last_err = Some(line);
+        let mut progress = |_done: usize| {};
+        let linked = ops::link_suggestions(
+            &conn,
+            &[(set_id, audio_path)],
+            None,
+            &mut progress,
+            &mut log,
+        )
+        .map_err(|e| e.to_string())?;
+        if linked == 1 {
+            Ok(())
+        } else {
+            Err(last_err.unwrap_or_else(|| "link failed".into()))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
+/// Bulk-link suggested bounce matches. Heavy (file moves + audio decodes for
+/// potentially hundreds of files) → spawn_blocking, parallel decode in ops,
+/// and "link-progress" events `(done, total)` so the UI can show progress.
 #[tauri::command(rename_all = "snake_case")]
-async fn link_watch_suggestions(matches: Vec<(i64, String)>) -> Result<(), String> {
-    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
-    for (set_id, audio_path) in matches {
-        let als_path = match indexer::set_path(&conn, set_id) {
-            Ok(p) => p,
-            Err(_) => continue,
+async fn link_watch_suggestions(
+    app: tauri::AppHandle,
+    state: State<'_, ScanState>,
+    matches: Vec<(i64, String)>,
+) -> Result<usize, String> {
+    // Same background-job treatment as scan_folder / bulk_preview_scan:
+    // shared cancel flag (the Cancel button works), scan-progress log events
+    // for the progress modal, plus link-progress (done, total) for the button.
+    state.cancel.store(false, Ordering::Relaxed);
+    let cancel_flag = state.cancel.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+        let total = matches.len();
+        let app_log = app.clone();
+        let mut log = move |line: String| {
+            let _ = app_log.emit("scan-progress", line);
         };
-        let als_path = std::path::Path::new(&als_path);
-        
-        let set_stem = match als_path.file_stem() {
-            Some(x) => x.to_string_lossy().into_owned(),
-            None => continue,
+        let app_prog = app.clone();
+        let mut progress = move |done: usize| {
+            let _ = app_prog.emit("link-progress", (done, total));
         };
-            
-        let project_dir = match als_path.parent() {
-            Some(p) => p,
-            None => continue,
-        };
-
-        let src_path = std::path::Path::new(&audio_path);
-        if !src_path.exists() {
-            continue;
-        }
-        
-        let ext = src_path
-            .extension()
-            .map(|x| x.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "wav".to_string());
-            
-        let target_path = project_dir.join(format!("{}.{}", set_stem, ext));
-
-        if let Some(parent) = target_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        
-        if std::fs::rename(src_path, &target_path).is_err() {
-            if std::fs::copy(src_path, &target_path).is_ok() {
-                let _ = std::fs::remove_file(src_path);
-            } else {
-                continue;
-            }
-        }
-
-        let _ = ops::attach(&conn, set_id, &target_path);
-    }
-    Ok(())
+        ops::link_suggestions(&conn, &matches, Some(&cancel_flag), &mut progress, &mut log)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 

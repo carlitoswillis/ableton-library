@@ -735,6 +735,141 @@ pub fn attach(conn: &Connection, set_id: i64, audio: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Bulk-link suggested bounce matches: move each audio file into its set's
+/// project folder (renamed to the set's stem) and attach it as a manual
+/// preview (confidence 1.0). File moves + SQLite writes run on the calling
+/// thread; audio decoding + peak extraction are parallelized across cores.
+/// `progress(done)` fires after each match is fully processed (linked OR
+/// failed) so a UI can show `done/total`. Returns the number linked.
+///
+/// MUST be called from a blocking-safe thread (spawn_blocking in the app) —
+/// this decodes audio and touches possibly-iCloud files.
+pub fn link_suggestions(
+    conn: &Connection,
+    matches: &[(i64, String)],
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    progress: &mut dyn FnMut(usize),
+    log: Log,
+) -> Result<usize> {
+    let cancelled =
+        || cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));
+    struct LinkTask {
+        set_id: i64,
+        project_id: i64,
+        target: PathBuf,
+    }
+
+    // Phase 1 (calling thread): move files into place, collect decode tasks.
+    let mut done = 0usize;
+    let mut tasks: Vec<LinkTask> = Vec::new();
+    for (set_id, audio_path) in matches {
+        if cancelled() {
+            anyhow::bail!("link cancelled by user");
+        }
+        let res = (|| -> Result<LinkTask> {
+            let als_path = indexer::set_path(conn, *set_id)?;
+            let als = Path::new(&als_path);
+            let stem = als
+                .file_stem()
+                .map(|x| x.to_string_lossy().into_owned())
+                .ok_or_else(|| anyhow::anyhow!("invalid set path: {als_path}"))?;
+            let project_dir = als
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("set path has no parent dir: {als_path}"))?;
+            let src = Path::new(audio_path);
+            if !src.exists() {
+                anyhow::bail!("source audio missing: {audio_path}");
+            }
+            let ext = src
+                .extension()
+                .map(|x| x.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "wav".into());
+            let target = project_dir.join(format!("{stem}.{ext}"));
+            std::fs::create_dir_all(project_dir)?;
+            if std::fs::rename(src, &target).is_err() {
+                // cross-device (e.g. iCloud <-> local): copy + delete
+                std::fs::copy(src, &target)?;
+                let _ = std::fs::remove_file(src);
+            }
+            Ok(LinkTask {
+                set_id: *set_id,
+                project_id: indexer::set_project_id(conn, *set_id)?,
+                target,
+            })
+        })();
+        match res {
+            Ok(t) => tasks.push(t),
+            Err(e) => {
+                log(format!("link failed for set {set_id}: {e}"));
+                done += 1;
+                progress(done);
+            }
+        }
+    }
+
+    // Phase 2: decode in parallel, upsert sequentially on this thread.
+    let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let (tx, rx) = std::sync::mpsc::sync_channel(num_cpus * 2);
+    let tasks_iter = std::sync::Mutex::new(tasks.into_iter());
+    let mut linked = 0usize;
+
+    std::thread::scope(|scope| {
+        for _ in 0..num_cpus {
+            let tx = tx.clone();
+            let tasks_iter = &tasks_iter;
+            scope.spawn(move || {
+                loop {
+                    if let Some(c) = cancel {
+                        if c.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                    let task = {
+                        let mut iter = tasks_iter.lock().unwrap();
+                        iter.next()
+                    };
+                    match task {
+                        Some(t) => {
+                            let row_res = build_preview_row(
+                                &t.target,
+                                Some(t.set_id),
+                                Some(t.project_id),
+                                "manual",
+                                1.0,
+                            );
+                            if tx.send((t, row_res)).is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            });
+        }
+        drop(tx);
+
+        for (t, row_res) in rx {
+            match row_res {
+                Ok(row) => match indexer::upsert_preview(conn, &row) {
+                    Ok(_) => {
+                        linked += 1;
+                        log(format!("linked {}", t.target.display()));
+                    }
+                    Err(e) => log(format!("ERROR inserting preview {}: {e}", t.target.display())),
+                },
+                Err(e) => log(format!("ERROR decoding {}: {e}", t.target.display())),
+            }
+            done += 1;
+            progress(done);
+        }
+    });
+
+    if cancelled() {
+        anyhow::bail!("link cancelled by user ({linked} linked before cancel)");
+    }
+    Ok(linked)
+}
+
 /// Matcher candidates for the whole catalog.
 fn catalog_candidates(conn: &Connection) -> Result<Vec<SetCandidate>> {
     let mut out = Vec::new();
