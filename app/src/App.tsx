@@ -1374,7 +1374,7 @@ export default function App() {
                   {selectedSuggestions.length > 0 && (
                     <button
                       className="open-btn"
-                      style={{ padding: "4px 8px", fontSize: "11px", borderColor: "var(--accent)", color: "var(--accent)" }}
+                      style={{ padding: "4px 8px", fontSize: "11px" }}
                       onClick={linkSelectedSuggestions}
                     >
                       Link Selected ({selectedSuggestions.length})
