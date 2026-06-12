@@ -11,11 +11,41 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use als_core::scan::iso_mtime;
-use als_core::{discover, parse_set};
+use als_core::{discover, parse_set, ParseError, SetSnapshot};
 use previews::matching::{best_match, normalize, MatchTarget, SetCandidate};
 
 /// Progress sink: cli prints to stderr, the app may ignore or forward.
 pub type Log<'a> = &'a mut dyn FnMut(String);
+
+/// A planned preview-decode job: name matching + DB filtering already done,
+/// only the expensive audio decode + peak extraction remains.
+#[derive(Debug, Clone)]
+pub struct DecodeJob {
+    pub audio: PathBuf,
+    pub set_id: Option<i64>,
+    pub project_id: Option<i64>,
+    pub confidence: f64,
+}
+
+/// Unit of work for the unified scan worker pool. Parsing .als files and
+/// decoding preview audio share one pool so neither starves the other —
+/// preview decoding must NEVER stall forward progress on project indexing.
+enum Job {
+    Parse { als: PathBuf, proj_dir: PathBuf, pid: i64 },
+    Decode(DecodeJob),
+}
+
+enum Done {
+    Parsed {
+        als: PathBuf,
+        pid: i64,
+        res: Result<SetSnapshot, ParseError>,
+    },
+    Decoded {
+        job: DecodeJob,
+        res: Result<indexer::PreviewRow>,
+    },
+}
 
 #[derive(Debug, Default, serde::Serialize)]
 pub struct ScanSummary {
@@ -58,8 +88,9 @@ pub fn scan_library(
     let mut project_info: std::collections::HashMap<i64, (PathBuf, String)> =
         std::collections::HashMap::new();
 
-    let mut tasks = Vec::new();
-    
+    let mut parse_tasks = Vec::new();
+    let mut initial_decode_jobs: Vec<DecodeJob> = Vec::new();
+
     conn.execute_batch("BEGIN")?;
     for proj in discover(&root_abs)? {
         if let Some(c) = cancel {
@@ -90,31 +121,48 @@ pub fn scan_library(
                 s.unchanged += 1;
                 continue;
             }
-            tasks.push((als, proj.dir.clone(), pid));
+            parse_tasks.push((als, proj.dir.clone(), pid));
             project_task_count += 1;
         }
 
         if harvest && project_task_count > 0 {
             pending_per_project.insert(pid, project_task_count);
         } else if harvest && project_task_count == 0 {
-            // All sets were fresh (unchanged) — harvest immediately in case
-            // new renders appeared in the folder since last scan.
-            match harvest_folder_renders(conn, &proj.dir, &proj.name, pid, &known_samples, cancel, log) {
-                Ok(n) => s.harvested += n,
+            // All sets were fresh (unchanged) — plan a harvest in case new
+            // renders appeared in the folder since last scan. Only the cheap
+            // matching happens here; decoding is queued for the worker pool.
+            match plan_folder_harvest(conn, &proj.dir, &proj.name, pid, &known_samples, cancel) {
+                Ok(jobs) => initial_decode_jobs.extend(jobs),
                 Err(e) => log(format!("preview harvest failed for {}: {e}", proj.dir.display())),
             }
         }
     }
 
-    // Process parsing in parallel
+    // Unified worker pool: .als parsing and preview decoding share one job
+    // queue, so preview decoding never stalls forward progress on indexing.
+    // Workers do CPU/disk work; the main thread does matching + SQLite writes.
     let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let (tx, rx) = std::sync::mpsc::sync_channel(num_cpus * 2);
-    let tasks_iter = std::sync::Mutex::new(tasks.into_iter());
+    // Job queue is unbounded so the main thread can always enqueue newly
+    // planned decode jobs without blocking (it is also the result consumer —
+    // blocking here would deadlock). Results are bounded for backpressure.
+    let (job_tx, job_rx) = std::sync::mpsc::channel::<Job>();
+    let job_rx = std::sync::Mutex::new(job_rx);
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Done>(num_cpus * 2);
+
+    let mut outstanding = 0usize;
+    for (als, proj_dir, pid) in parse_tasks {
+        job_tx.send(Job::Parse { als, proj_dir, pid }).ok();
+        outstanding += 1;
+    }
+    for job in initial_decode_jobs {
+        job_tx.send(Job::Decode(job)).ok();
+        outstanding += 1;
+    }
 
     std::thread::scope(|scope| {
         for _ in 0..num_cpus {
-            let tx = tx.clone();
-            let tasks_iter = &tasks_iter;
+            let done_tx = done_tx.clone();
+            let job_rx = &job_rx;
             scope.spawn(move || {
                 loop {
                     if let Some(c) = cancel {
@@ -122,80 +170,109 @@ pub fn scan_library(
                             break;
                         }
                     }
-                    let task = {
-                        let mut iter = tasks_iter.lock().unwrap();
-                        iter.next()
-                    };
-                    match task {
-                        Some((als, proj_dir, pid)) => {
-                            let snap = parse_set(&als, &proj_dir);
-                            if tx.send((als, pid, snap)).is_err() {
+                    let job = job_rx.lock().unwrap().recv();
+                    match job {
+                        Ok(Job::Parse { als, proj_dir, pid }) => {
+                            let res = parse_set(&als, &proj_dir);
+                            if done_tx.send(Done::Parsed { als, pid, res }).is_err() {
                                 break;
                             }
                         }
-                        None => break,
+                        Ok(Job::Decode(job)) => {
+                            let res = build_preview_row(
+                                &job.audio,
+                                job.set_id,
+                                job.project_id,
+                                "discovered",
+                                job.confidence,
+                            );
+                            if done_tx.send(Done::Decoded { job, res }).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break, // queue closed — no more work
                     }
                 }
             });
         }
-        drop(tx);
+        drop(done_tx);
 
-        for (als, pid, res) in rx {
-            match res {
-                Ok(snap) => {
-                    // Add this set's sample paths to known_samples before harvest
-                    if harvest {
-                        for sample in &snap.samples {
-                            known_samples.insert(sample.path.clone());
+        while outstanding > 0 {
+            // If workers bailed early (cancel), the done channel closes and
+            // recv errs — break instead of waiting forever.
+            let done = match done_rx.recv() {
+                Ok(d) => d,
+                Err(_) => break,
+            };
+            outstanding -= 1;
+
+            match done {
+                Done::Parsed { als, pid, res } => {
+                    match res {
+                        Ok(snap) => {
+                            // Add this set's sample paths to known_samples before harvest
+                            if harvest {
+                                for sample in &snap.samples {
+                                    known_samples.insert(sample.path.clone());
+                                }
+                            }
+
+                            if let Err(e) = indexer::ingest_set(conn, pid, &snap) {
+                                s.errors += 1;
+                                log(format!("ERROR inserting {}: {}", als.display(), e));
+                            } else {
+                                s.indexed += 1;
+                                log(format!("indexed {}", als.display()));
+                            }
+                        }
+                        Err(e) => {
+                            s.errors += 1;
+                            log(format!("ERROR parsing {}: {}", als.display(), e));
                         }
                     }
 
-                    if let Err(e) = indexer::ingest_set(conn, pid, &snap) {
-                        s.errors += 1;
-                        log(format!("ERROR inserting {}: {}", als.display(), e));
-                    } else {
-                        s.indexed += 1;
-                        log(format!("indexed {}", als.display()));
-                    }
-
-                    // Check if this project is now fully ingested → harvest
+                    // Project fully ingested (successes AND failures both
+                    // count down) → plan its harvest and queue decode jobs.
                     if harvest {
                         if let Some(remaining) = pending_per_project.get_mut(&pid) {
                             *remaining -= 1;
                             if *remaining == 0 {
                                 pending_per_project.remove(&pid);
                                 if let Some((dir, name)) = project_info.remove(&pid) {
-                                    match harvest_folder_renders(conn, &dir, &name, pid, &known_samples, cancel, log) {
-                                        Ok(n) => s.harvested += n,
-                                        Err(e) => log(format!("preview harvest failed for {}: {e}", dir.display())),
+                                    match plan_folder_harvest(conn, &dir, &name, pid, &known_samples, cancel) {
+                                        Ok(jobs) => {
+                                            for job in jobs {
+                                                if job_tx.send(Job::Decode(job)).is_ok() {
+                                                    outstanding += 1;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => log(format!(
+                                            "preview harvest failed for {}: {e}",
+                                            dir.display()
+                                        )),
                                     }
                                 }
                             }
                         }
                     }
                 }
-                Err(e) => {
-                    s.errors += 1;
-                    log(format!("ERROR parsing {}: {}", als.display(), e));
-
-                    // Still decrement pending count on errors
-                    if harvest {
-                        if let Some(remaining) = pending_per_project.get_mut(&pid) {
-                            *remaining -= 1;
-                            if *remaining == 0 {
-                                pending_per_project.remove(&pid);
-                                if let Some((dir, name)) = project_info.remove(&pid) {
-                                    match harvest_folder_renders(conn, &dir, &name, pid, &known_samples, cancel, log) {
-                                        Ok(n) => s.harvested += n,
-                                        Err(e2) => log(format!("preview harvest failed for {}: {e2}", dir.display())),
-                                    }
-                                }
-                            }
+                Done::Decoded { job, res } => match res {
+                    Ok(row) => {
+                        if let Err(e) = indexer::upsert_preview(conn, &row) {
+                            log(format!("ERROR inserting preview {}: {}", job.audio.display(), e));
+                        } else {
+                            s.harvested += 1;
+                            log(format!("preview ({:.2}) {}", job.confidence, job.audio.display()));
                         }
                     }
-                }
+                    Err(e) => log(format!("ERROR decoding {}: {}", job.audio.display(), e)),
+                },
             }
         }
+
+        // Close the job queue so idle workers exit and the scope can join.
+        drop(job_tx);
     });
 
     let stale_previews = indexer::prune_stale_previews(conn)?;
@@ -231,22 +308,26 @@ fn build_preview_row(
     })
 }
 
-/// Attach renders found INSIDE one project folder to that project's sets.
+/// Plan the harvest of renders found INSIDE one project folder: discover
+/// audio files, name-match them to the project's sets, pick winners, and
+/// filter against DB state. Returns the decode jobs still to be done — the
+/// expensive part (audio decode + peaks) is deliberately NOT performed here
+/// so callers can schedule it on a worker pool.
+///
 /// Folder placement is strong evidence, so matching is local and generous:
 /// name match -> that set (+0.05 folder bonus); no name match but the project
 /// has exactly one set -> that set at 0.7; otherwise skipped.
-pub fn harvest_folder_renders(
+pub fn plan_folder_harvest(
     conn: &Connection,
     dir: &Path,
     project_name: &str,
     pid: i64,
     known_samples: &HashSet<String>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
-    log: Log,
-) -> Result<usize> {
+) -> Result<Vec<DecodeJob>> {
     let sets = indexer::project_sets(conn, pid)?;
     if sets.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let norm_project = normalize(project_name.trim_end_matches(" Project"));
     let cands: Vec<SetCandidate> = sets
@@ -265,8 +346,6 @@ pub fn harvest_folder_renders(
         })
         .collect();
 
-    let mut count = 0usize;
-    
     // First pass: Group by (set_id, project_id) and keep only the best match
     struct Win {
         render: previews::RenderFile,
@@ -324,12 +403,12 @@ pub fn harvest_folder_renders(
         }
     }
 
-    // Second pass: filter winners against DB state
-    let mut tasks = Vec::new();
+    // Second pass: filter winners against DB state, emit decode jobs
+    let mut jobs = Vec::new();
     for (key, win) in winners {
         let (set_id, project_id) = key;
         let abs = std::path::absolute(&win.render.path)?.to_string_lossy().into_owned();
-        
+
         if indexer::preview_is_fresh(conn, set_id, &abs, win.size, &win.mtime)? {
             continue;
         }
@@ -344,30 +423,51 @@ pub fn harvest_folder_renders(
                 }
             }
         }
-        
-        tasks.push((key, win));
-    }
 
-    // Third pass: decode audio in parallel
+        jobs.push(DecodeJob {
+            audio: win.render.path,
+            set_id,
+            project_id,
+            confidence: win.confidence,
+        });
+    }
+    Ok(jobs)
+}
+
+/// Plan + execute a single-folder harvest (decode parallelized internally).
+/// Standalone entry point for callers outside a library scan (the app's
+/// per-folder rescan); `scan_library` instead feeds `plan_folder_harvest`
+/// jobs into its unified worker pool.
+pub fn harvest_folder_renders(
+    conn: &Connection,
+    dir: &Path,
+    project_name: &str,
+    pid: i64,
+    known_samples: &HashSet<String>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    log: Log,
+) -> Result<usize> {
+    let jobs = plan_folder_harvest(conn, dir, project_name, pid, known_samples, cancel)?;
+    let mut count = 0usize;
+
     let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let (tx, rx) = std::sync::mpsc::sync_channel(num_cpus * 2);
-    let tasks_iter = std::sync::Mutex::new(tasks.into_iter());
+    let jobs_iter = std::sync::Mutex::new(jobs.into_iter());
 
     std::thread::scope(|scope| {
         for _ in 0..num_cpus {
             let tx = tx.clone();
-            let tasks_iter = &tasks_iter;
+            let jobs_iter = &jobs_iter;
             scope.spawn(move || {
                 loop {
-                    let task = {
-                        let mut iter = tasks_iter.lock().unwrap();
+                    let job = {
+                        let mut iter = jobs_iter.lock().unwrap();
                         iter.next()
                     };
-                    match task {
-                        Some((key, win)) => {
-                            let (set_id, project_id) = key;
-                            let row_res = build_preview_row(&win.render.path, set_id, project_id, "discovered", win.confidence);
-                            if tx.send((win, row_res)).is_err() {
+                    match job {
+                        Some(job) => {
+                            let row_res = build_preview_row(&job.audio, job.set_id, job.project_id, "discovered", job.confidence);
+                            if tx.send((job, row_res)).is_err() {
                                 break;
                             }
                         }
@@ -378,21 +478,21 @@ pub fn harvest_folder_renders(
         }
         drop(tx);
 
-        for (win, row_res) in rx {
+        for (job, row_res) in rx {
             match row_res {
                 Ok(row) => {
                     if let Err(e) = indexer::upsert_preview(conn, &row) {
-                        log(format!("ERROR inserting preview {}: {}", win.render.path.display(), e));
+                        log(format!("ERROR inserting preview {}: {}", job.audio.display(), e));
                     } else {
                         count += 1;
-                        log(format!("preview ({:.2}) {}", win.confidence, win.render.path.display()));
+                        log(format!("preview ({:.2}) {}", job.confidence, job.audio.display()));
                     }
                 }
-                Err(e) => log(format!("ERROR decoding {}: {}", win.render.path.display(), e)),
+                Err(e) => log(format!("ERROR decoding {}: {}", job.audio.display(), e)),
             }
         }
     });
-    
+
     Ok(count)
 }
 

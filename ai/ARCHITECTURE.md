@@ -27,7 +27,7 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
 - **Version tolerance**: No Ableton SDK (user on Live 11; SDK is Live 12 Suite beta only). Parse leniently across Live versions, backward (9/10/11) and forward (12+): ignore unknown elements, tolerate missing ones, record Creator/version per set, and emit per-field extraction warnings instead of failing the whole file.
 - **Extracts**: Live version, tempo/time sig, tracks (type/name/color), clip names, device/plugin names, sample file references.
 - **Output**: Normalized ProjectSnapshot JSON per set.
-- **Concurrency**: `scan_library` in the `ops` crate parallelizes `.als` decompression + XML parsing across all CPU cores via `std::thread::scope`. Worker threads parse independently; results funnel to the main thread for sequential SQLite writes (SQLite single-writer constraint). Preview harvesting is **interleaved** — each project's in-folder renders are harvested immediately after all its `.als` files are ingested (per-project pending counter), rather than in a separate bulk pass. `known_samples` (sample cross-check) is loaded from DB at scan start and grown incrementally from each ingested snapshot's sample paths.
+- **Concurrency**: `scan_library` in the `ops` crate runs ONE worker pool (all CPU cores, `std::thread::scope`) consuming a **unified job queue** of two job kinds: `Parse` (.als decompression + XML parsing) and `Decode` (preview audio decode + peak extraction). The main thread is the only SQLite writer (single-writer constraint) and the only job producer: it ingests parsed snapshots as they arrive and, when a project's last `.als` is ingested (per-project pending counter), runs the cheap name-matching (`plan_folder_harvest`) and pushes the resulting decode jobs into the same queue. **Preview decoding therefore never stalls project indexing** — earlier design called `harvest_folder_renders` inline on the consumer thread, which blocked the parse channel and parked all parser threads whenever a project had previews (user-observed 2026-06-11). Deadlock-safety invariants: job queue unbounded (producer == consumer, must never block), done channel bounded for backpressure, cancellation closes the done channel so the main loop exits. `known_samples` (sample cross-check) is loaded from DB at scan start and grown incrementally from each ingested snapshot's sample paths.
 
 ### 2. Metadata & Indexing Service — `indexer` (Rust + SQLite)
 - **Decision**: SQLite with FTS5 (over names) for search.
@@ -42,7 +42,7 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
   - (b) **Automated Live export** (flagship, post-catalog): worker launches a *second* Live install with the set, drives File -> Export via macOS UI automation (proven previously by owner). Constraints: serialize one render at a time; debounce save bursts; handle dialogs (missing samples, version prompts); UI scripting steals focus so make it opt-in/idle-scheduled; treat Live as flaky (timeouts, retry once, mark "render failed" rather than wedging queue). Isolated component — can start as a standalone script consuming jobs and emitting audio files.
 - **Previews are per-SET, not per-project** (projects can hold multiple distinct .als, e.g. "wanna be your" + "wanna be your2"). Discovery must match found renders to sets by filename similarity (normalized prefix match vs set name); ambiguous matches attach at project level with low confidence. The export worker has no ambiguity (it knows which set it rendered).
 - **Waveforms**: Decode (symphonia), precompute peaks once, cache keyed by set hash.
-- **Concurrency**: Both `hunt_renders` (bulk scan) and `harvest_folder_renders` (in-folder auto-harvest) parallelize audio decoding + peak extraction via `std::thread::scope`, same pattern as the library scanner.
+- **Concurrency**: `hunt_renders` (bulk scan) and standalone `harvest_folder_renders` (the app's per-folder rescan) parallelize audio decoding + peak extraction via `std::thread::scope`. Inside `scan_library`, harvesting is split: `plan_folder_harvest` (cheap matching + DB filter, main thread) emits `DecodeJob`s into the scanner's unified worker pool.
 
 ### 4. User Interface — Tauri 2 [skeleton BUILT 2026-06-11]
 - **Decision**: Tauri 2 shell, React/TS frontend; core logic lives in the Tauri Rust backend (no sidecar). Audio streamed to webview via asset protocol (when previews land).
@@ -51,12 +51,11 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
 
 ## Data Flow
 ```
-Filesystem (.als) -> als-core (streaming parse, multi-threaded)
-                  -> indexer (SQLite ingest, sequential)
-                  -> harvest_folder_renders (immediate, per-project)
-                  -> Tauri commands -> React UI
+Filesystem (.als + renders) -> unified worker pool (Parse | Decode jobs, all cores)
+                            -> main thread (SQLite writes + plan_folder_harvest matching)
+                            -> Tauri commands -> React UI
 ```
-Key design: scan + harvest are interleaved per-project, not batched. The user sees `indexed -> preview -> indexed -> preview` in the logs.
+Key design: scan + harvest are interleaved per-project AND share one worker pool — a project's decode jobs are queued the moment its last `.als` is ingested, but indexing of later projects continues in parallel. Logs interleave (`indexed -> preview -> indexed`) without lockstep stalls.
 
 ## Known Naming Inconsistencies (backlog)
 The codebase has grown organically and several naming choices are vague or inconsistent. These should be addressed in a dedicated rename pass:
