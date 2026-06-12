@@ -58,7 +58,15 @@ pub fn discover_renders(roots: &[PathBuf], max_depth: Option<usize>) -> std::io:
                 continue;
             }
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            if size < MIN_RENDER_BYTES {
+            let ext = p.extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let min_bytes = if ext == "mp3" || ext == "m4a" {
+                100_000 // 100 KB for compressed formats
+            } else {
+                MIN_RENDER_BYTES // 1 MB for uncompressed formats (wav, aiff, etc.)
+            };
+            if size < min_bytes {
                 continue;
             }
             out.push(RenderFile {
