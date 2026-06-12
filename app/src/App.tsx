@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import PlayerBar, { PlayerTrack } from "./PlayerBar";
 
 type ScanSummary = {
@@ -68,6 +69,15 @@ export default function App() {
   const [track, setTrack] = useState<PlayerTrack | null>(null);
   const [scanning, setScanning] = useState(false);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
+  const [scanLogs, setScanLogs] = useState<string[]>([]);
+  const [showProgressModal, setShowProgressModal] = useState(false);
+  const [liveStats, setLiveStats] = useState({
+    indexed: 0,
+    unchanged: 0,
+    previews: 0,
+    errors: 0,
+  });
+  const logConsoleRef = useRef<HTMLDivElement | null>(null);
 
   const runSearch = useCallback(async () => {
     try {
@@ -98,6 +108,32 @@ export default function App() {
     refreshStats();
   }, [refreshStats]);
 
+  useEffect(() => {
+    let unlistenFn: (() => void) | null = null;
+    listen<string>("scan-progress", (event) => {
+      const line = event.payload;
+      setScanLogs((prev) => [...prev, line]);
+      if (line.startsWith("indexed")) {
+        setLiveStats((prev) => ({ ...prev, indexed: prev.indexed + 1 }));
+      } else if (line.startsWith("ERROR")) {
+        setLiveStats((prev) => ({ ...prev, errors: prev.errors + 1 }));
+      } else if (line.startsWith("preview")) {
+        setLiveStats((prev) => ({ ...prev, previews: prev.previews + 1 }));
+      }
+    }).then((unsub) => {
+      unlistenFn = unsub;
+    });
+    return () => {
+      if (unlistenFn) unlistenFn();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (logConsoleRef.current) {
+      logConsoleRef.current.scrollTop = logConsoleRef.current.scrollHeight;
+    }
+  }, [scanLogs]);
+
   const pickAndScan = async () => {
     try {
       const dir = await openDialog({
@@ -106,10 +142,19 @@ export default function App() {
         title: "Choose a folder of Ableton projects",
       });
       if (!dir) return;
+      setScanLogs([]);
+      setLiveStats({ indexed: 0, unchanged: 0, previews: 0, errors: 0 });
+      setShowProgressModal(true);
       setScanning(true);
       setError(null);
       setScanMsg(null);
       const s = await invoke<ScanSummary>("scan_folder", { root: dir });
+      setLiveStats({
+        indexed: s.indexed,
+        unchanged: s.unchanged,
+        previews: s.harvested,
+        errors: s.errors,
+      });
       setScanMsg(
         `${s.indexed} indexed, ${s.unchanged} unchanged, ${s.harvested} preview(s) harvested` +
           (s.errors ? `, ${s.errors} errors` : ""),
@@ -118,6 +163,7 @@ export default function App() {
       runSearch();
     } catch (e) {
       setError(String(e));
+      setShowProgressModal(false);
     } finally {
       setScanning(false);
     }
@@ -329,6 +375,72 @@ export default function App() {
           </aside>
         )}
       </div>
+
+      {showProgressModal && (
+        <div className="modal-overlay" onClick={() => !scanning && setShowProgressModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="modal-title">
+                {scanning ? "Scanning Library..." : "Scan Complete"}
+              </h2>
+              {!scanning && (
+                <button
+                  className="modal-close-btn"
+                  onClick={() => setShowProgressModal(false)}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+
+            <div className="scan-stats-row">
+              <div className="scan-stat">
+                <span className="scan-stat-label">Indexed</span>
+                <span className="scan-stat-value">{liveStats.indexed}</span>
+              </div>
+              <div className="scan-stat">
+                <span className="scan-stat-label">Unchanged</span>
+                <span className="scan-stat-value">{liveStats.unchanged}</span>
+              </div>
+              <div className="scan-stat">
+                <span className="scan-stat-label">Previews</span>
+                <span className="scan-stat-value">{liveStats.previews}</span>
+              </div>
+              <div className="scan-stat">
+                <span className="scan-stat-label">Errors</span>
+                <span className="scan-stat-value error-text">{liveStats.errors}</span>
+              </div>
+            </div>
+
+            <div className="scan-log-console" ref={logConsoleRef}>
+              {scanLogs.length === 0 && (
+                <div style={{ color: "var(--dim)" }}>Waiting for progress updates...</div>
+              )}
+              {scanLogs.map((log, index) => {
+                let className = "";
+                if (log.startsWith("ERROR")) className = "log-error";
+                else if (log.startsWith("preview")) className = "log-preview";
+                else if (log.startsWith("indexed")) className = "log-indexed";
+                return (
+                  <div key={index} className={`log-line ${className}`}>
+                    {log}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="modal-footer">
+              <button
+                className="open-btn"
+                disabled={scanning}
+                onClick={() => setShowProgressModal(false)}
+              >
+                {scanning ? "Scanning..." : "Done"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {track && <PlayerBar track={track} onClose={() => setTrack(null)} />}
     </div>

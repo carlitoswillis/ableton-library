@@ -396,3 +396,143 @@ header h1 {
 .chip.group { background: var(--group); }
 .chip.native { background: var(--native); color: #fff; }
 .chip.au, .chip.vst, .chip.vst3 { background: var(--accent); }
+
+/* Modal / Live Progress UI */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+}
+
+.modal-content {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 600px;
+  max-width: 90%;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+  animation: modalFadeIn 0.18s ease-out;
+}
+
+@keyframes modalFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.modal-title {
+  font-size: 16px;
+  font-weight: 650;
+  margin: 0;
+}
+
+.modal-close-btn {
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.modal-close-btn:hover {
+  color: var(--text);
+}
+
+.scan-stats-row {
+  display: flex;
+  gap: 16px;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  justify-content: space-around;
+  border: 1px solid var(--border);
+}
+
+.scan-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.scan-stat-label {
+  color: var(--dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+  letter-spacing: 0.05em;
+}
+
+.scan-stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.scan-stat-value.error-text {
+  color: #ff8f8f;
+}
+
+.scan-log-console {
+  flex: 1;
+  min-height: 200px;
+  max-height: 400px;
+  background: #0d0d11;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  overflow-y: auto;
+  font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #c5c9db;
+  text-align: left;
+}
+
+.log-line {
+  margin-bottom: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-indexed {
+  color: var(--audio);
+}
+
+.log-preview {
+  color: var(--accent);
+}
+
+.log-error {
+  color: #ff8f8f;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 18px;
+}

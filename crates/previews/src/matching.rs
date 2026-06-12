@@ -29,28 +29,18 @@ pub fn normalize(s: &str) -> String {
     // strip only [...] chunks; keep (...) content (often "(prod. x)" = identity)
     let mut cleaned = String::with_capacity(lower.len());
     let mut depth = 0i32;
-    let mut prev: Option<char> = None;
     for c in lower.chars() {
         match c {
             '[' | '{' => depth += 1,
             ']' | '}' => depth = (depth - 1).max(0),
             _ if depth == 0 => {
                 let out = if c.is_alphanumeric() { c } else { ' ' };
-                // split digit<->letter boundaries: 145bpm -> 145 bpm
-                if let Some(p) = prev {
-                    if (p.is_ascii_digit() && out.is_alphabetic())
-                        || (p.is_alphabetic() && out.is_ascii_digit())
-                    {
-                        cleaned.push(' ');
-                    }
-                }
                 cleaned.push(out);
-                prev = if out == ' ' { None } else { Some(out) };
             }
             _ => {}
         }
     }
-    let tokens: Vec<&str> = cleaned
+    let tokens: Vec<String> = cleaned
         .split_whitespace()
         .filter(|t| {
             if STOPWORDS.contains(t) {
@@ -64,6 +54,23 @@ pub fn normalize(s: &str) -> String {
                 return false;
             }
             true
+        })
+        .map(|t| {
+            // split digit<->letter boundaries: 145bpm -> 145 bpm
+            let mut split = String::with_capacity(t.len() * 2);
+            let mut prev: Option<char> = None;
+            for c in t.chars() {
+                if let Some(p) = prev {
+                    if (p.is_ascii_digit() && c.is_alphabetic())
+                        || (p.is_alphabetic() && c.is_ascii_digit())
+                    {
+                        split.push(' ');
+                    }
+                }
+                split.push(c);
+                prev = Some(c);
+            }
+            split
         })
         .collect();
     tokens.join(" ")

@@ -73,16 +73,21 @@ async fn preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
     }))
 }
 
+use tauri::Emitter;
+
 /// Index a folder of Ableton projects (incremental; harvests in-folder
 /// renders as previews). Same engine as `ableton-scan scan`.
 ///
 /// MUST be async + spawn_blocking: synchronous Tauri commands run on the
 /// MAIN thread and freeze the whole window (the beach ball incident).
 #[tauri::command(rename_all = "snake_case")]
-async fn scan_folder(root: String) -> Result<ops::ScanSummary, String> {
+async fn scan_folder(app: tauri::AppHandle, root: String) -> Result<ops::ScanSummary, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
-        let mut log = |_line: String| {}; // per-file progress not surfaced yet
+        let app_clone = app.clone();
+        let mut log = move |line: String| {
+            let _ = app_clone.emit("scan-progress", line);
+        };
         ops::scan_library(&conn, std::path::Path::new(&root), false, true, &mut log)
             .map_err(|e| e.to_string())
     })
