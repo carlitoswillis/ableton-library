@@ -23,7 +23,7 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 - [x] In-app scanning: "Scan folder…" header button -> native picker (tauri-plugin-dialog, dialog:default capability) -> scan_folder command (ops::scan_library incl. harvest) -> stats+results refresh + summary message. NOTE: requires `npm install` (new plugin-dialog dep); per-file progress not yet surfaced (future: Tauri events + progress UI).
 - [x] **GOTCHA (beach-ball incident)**: sync Tauri commands run on the MAIN thread -> scan froze the window. ALL commands now async; scan_folder additionally wraps work in tauri::async_runtime::spawn_blocking. Rule going forward: any command touching disk/db is async; anything heavy goes in spawn_blocking.
 - [ ] **NEXT (user's test plan)**: dump db (`ableton-scan reset --yes`), bounce some current-year tracks into one folder, `scan` the matching projects + `previews` that folder, evaluate match quality from a controlled sample. NO full-system hunt (user explicitly declined).
-- [ ] Later in M3: previews in detail pane (list all, switch primary), historical preview archive, in-app "hunt for previews" UI.
+- [ ] Later in M3: previews in detail pane — list ALL of a set's previews, switch primary, manual attach/replace from the UI (user asked "what if i want to update the preview?": re-bounce to same path = auto-replaced on rescan via mtime; new file = new row, newest wins at equal confidence; `attach` = manual trump at 1.0 — UI affordance for all this still missing). Also: historical preview archive, in-app "hunt for previews" UI.
 - [ ] M4: in-app export worker (second Live install + UI automation queue).
 
 ## UI skeleton (Tauri): ✅ DONE + verified (2026-06-11)
