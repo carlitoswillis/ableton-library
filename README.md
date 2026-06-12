@@ -12,9 +12,11 @@ Requires Rust 1.79+ (`curl https://sh.rustup.rs -sSf | sh`).
 cargo build --release
 alias ableton-scan=./target/release/ableton-scan
 
-# index a library into the SQLite catalog (incremental — rescans only changed files)
+# index a library into the SQLite catalog (incremental — rescans only changed files).
+# renders found inside project folders are auto-harvested as previews.
 ableton-scan scan "<path to your projects root>"
-ableton-scan scan "<root>" --force   # re-ingest everything (e.g. after parser upgrades)
+ableton-scan scan "<root>" --force         # re-ingest everything (e.g. after parser upgrades)
+ableton-scan scan "<root>" --no-previews   # skip render harvest (avoids iCloud audio downloads)
 
 # query it
 ableton-scan search "korg"                       # FTS over project/set/track/device/sample names

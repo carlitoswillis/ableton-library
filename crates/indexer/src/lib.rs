@@ -525,6 +525,14 @@ pub fn set_match_candidates(conn: &Connection) -> Result<Vec<(i64, i64, String, 
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// (set_id, als_path) for every set in a project.
+pub fn project_sets(conn: &Connection, project_id: i64) -> Result<Vec<(i64, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT id, als_path FROM sets WHERE project_id = ?1 ORDER BY als_path")?;
+    let rows = stmt.query_map(params![project_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// The project a set belongs to.
 pub fn set_project_id(conn: &Connection, set_id: i64) -> Result<i64> {
     Ok(conn

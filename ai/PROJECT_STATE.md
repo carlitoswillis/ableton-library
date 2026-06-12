@@ -11,6 +11,7 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 - **Matcher revision (user feedback)**: bpm/key/"(prod. x)" are often PART of project names (user's old naming habit) — KEEP them as distinguishing signal; normalize form instead ("145bpm" -> "145 bpm"); strip only [bracketed timestamps], stopwords (final/master/...), vN. Tests cover the disambiguation case.
 - [x] `reset` subcommand (deletes db + WAL/SHM; dry-run unless --yes).
 - [x] Sample-safety (user concern): discovery skips Samples/Backup/Ableton Project Info dirs, hidden files, <1MB files; AND cross-checks the catalog's samples table — a file referenced as a sample by any set is never attached as a preview.
+- [x] In-folder harvest (user request): `scan` auto-harvests renders found inside project folders (folder placement = signal): name match -> set (+0.05 bonus); no name match in single-set project -> 0.7; else project-level. `--no-previews` opts out (iCloud). Harvest runs post-commit so sample cross-check sees the just-indexed catalog.
 - [ ] **NEXT (user's test plan)**: dump db (`ableton-scan reset --yes`), bounce some current-year tracks into one folder, `scan` the matching projects + `previews` that folder, evaluate match quality from a controlled sample. NO full-system hunt (user explicitly declined).
 - [ ] Later in M3: previews in detail pane (list all, switch primary), historical preview archive, in-app "hunt for previews" UI.
 - [ ] M4: in-app export worker (second Live install + UI automation queue).

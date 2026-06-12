@@ -33,6 +33,8 @@ enum Cmd {
         pretty: bool,
     },
     /// Incrementally index a library into the SQLite catalog.
+    /// Renders found inside project folders are harvested as previews
+    /// automatically (disable with --no-previews).
     Scan {
         root: PathBuf,
         #[arg(long)]
@@ -40,6 +42,9 @@ enum Cmd {
         /// Re-parse and re-ingest every set, ignoring the freshness check.
         #[arg(long)]
         force: bool,
+        /// Skip the in-folder render harvest (e.g. to avoid iCloud downloads).
+        #[arg(long)]
+        no_previews: bool,
     },
     /// Search the catalog. TEXT uses FTS5 over project/set/track/device/sample names.
     Search {
@@ -110,7 +115,7 @@ fn db_path(opt: Option<PathBuf>) -> Result<PathBuf> {
 fn main() -> Result<()> {
     match Args::parse().cmd {
         Cmd::Json { root, pretty } => cmd_json(&root, pretty),
-        Cmd::Scan { root, db, force } => cmd_scan(&root, db, force),
+        Cmd::Scan { root, db, force, no_previews } => cmd_scan(&root, db, force, no_previews),
         Cmd::Search { text, min_bpm, max_bpm, plugin, db } => {
             cmd_search(text, min_bpm, max_bpm, plugin, db)
         }
@@ -194,6 +199,74 @@ fn build_preview_row(
         duration: Some(pk.duration_secs),
         peaks_json: Some(previews::peaks::to_json(&pk.peaks)),
     })
+}
+
+/// Attach renders found INSIDE one project folder to that project's sets.
+/// Folder placement is strong evidence, so matching is local and generous:
+/// name match -> that set (+0.05 folder bonus); no name match but the project
+/// has exactly one set -> that set at 0.7; otherwise project-level at 0.5.
+fn harvest_folder_renders(
+    conn: &rusqlite::Connection,
+    dir: &Path,
+    project_name: &str,
+    pid: i64,
+    known_samples: &HashSet<String>,
+) -> Result<usize> {
+    use previews::matching::{best_match, normalize, MatchTarget, SetCandidate};
+    let sets = indexer::project_sets(conn, pid)?;
+    if sets.is_empty() {
+        return Ok(0);
+    }
+    let norm_project = normalize(project_name.trim_end_matches(" Project"));
+    let cands: Vec<SetCandidate> = sets
+        .iter()
+        .map(|(set_id, als_path)| SetCandidate {
+            set_id: *set_id,
+            project_id: pid,
+            norm_stem: normalize(
+                &Path::new(als_path)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            norm_project: norm_project.clone(),
+            project_set_count: sets.len(),
+        })
+        .collect();
+
+    let mut count = 0usize;
+    for r in previews::discover_renders(&[dir.to_path_buf()])? {
+        let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
+        if known_samples.contains(&abs) {
+            continue;
+        }
+        let (set_id, project_id, confidence) =
+            match best_match(&normalize(&r.stem), &cands, 0.6) {
+                Some(m) => match m.target {
+                    MatchTarget::Set { set_id, project_id } => {
+                        (Some(set_id), Some(project_id), (m.confidence + 0.05).min(1.0))
+                    }
+                    MatchTarget::Project { project_id } => (None, Some(project_id), m.confidence),
+                },
+                // No name resemblance, but a render in a single-set project
+                // folder can only belong to that set.
+                None if sets.len() == 1 => (Some(sets[0].0), Some(pid), 0.7),
+                None => continue,
+            };
+        let mtime = iso_mtime(&r.path)?;
+        if indexer::preview_is_fresh(&conn, set_id, &abs, r.size, &mtime)? {
+            continue;
+        }
+        match build_preview_row(&r.path, set_id, project_id, "discovered", confidence) {
+            Ok(row) => {
+                indexer::upsert_preview(conn, &row)?;
+                count += 1;
+                eprintln!("  preview ({confidence:.2}) {}", r.path.display());
+            }
+            Err(e) => eprintln!("  ERROR decoding {}: {e}", r.path.display()),
+        }
+    }
+    Ok(count)
 }
 
 fn cmd_previews(
@@ -318,7 +391,7 @@ fn cmd_json(root: &Path, pretty: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_scan(root: &Path, db: Option<PathBuf>, force: bool) -> Result<()> {
+fn cmd_scan(root: &Path, db: Option<PathBuf>, force: bool, no_previews: bool) -> Result<()> {
     let db = db_path(db)?;
     let conn = indexer::open(&db)?;
     let root_abs = std::path::absolute(root)?;
@@ -326,11 +399,13 @@ fn cmd_scan(root: &Path, db: Option<PathBuf>, force: bool) -> Result<()> {
 
     let (mut parsed, mut fresh, mut errors) = (0usize, 0usize, 0usize);
     let mut seen: HashSet<String> = HashSet::new();
+    let mut harvest_targets: Vec<(PathBuf, String, i64)> = Vec::new();
 
     conn.execute_batch("BEGIN")?;
     for proj in discover(&root_abs)? {
         let folder = std::path::absolute(&proj.dir)?.to_string_lossy().into_owned();
         let pid = indexer::upsert_project(&conn, &folder, &proj.name, &now)?;
+        harvest_targets.push((proj.dir.clone(), proj.name.clone(), pid));
         indexer::replace_backups(&conn, pid, &proj.backups)?;
         for als in &proj.als_files {
             let als_abs = std::path::absolute(als)?.to_string_lossy().into_owned();
@@ -357,9 +432,24 @@ fn cmd_scan(root: &Path, db: Option<PathBuf>, force: bool) -> Result<()> {
     let removed = indexer::prune_missing(&conn, &root_abs.to_string_lossy(), &seen)?;
     conn.execute_batch("COMMIT")?;
 
+    // Harvest pass: renders sitting inside project folders are near-certain
+    // matches (the folder placement is the signal). Runs after commit so the
+    // samples cross-check sees everything just indexed.
+    let mut harvested = 0usize;
+    if !no_previews {
+        let known_samples = indexer::all_sample_paths(&conn)?;
+        for (dir, name, pid) in &harvest_targets {
+            harvested += harvest_folder_renders(&conn, dir, name, *pid, &known_samples)
+                .unwrap_or_else(|e| {
+                    eprintln!("  preview harvest failed for {}: {e}", dir.display());
+                    0
+                });
+        }
+    }
+
     let st = indexer::stats(&conn)?;
     eprintln!(
-        "scan done: {parsed} indexed, {fresh} unchanged, {errors} errors, {removed} pruned"
+        "scan done: {parsed} indexed, {fresh} unchanged, {errors} errors, {removed} pruned, {harvested} preview(s) harvested"
     );
     eprintln!(
         "catalog: {} projects, {} sets, {} tracks, {} devices, {} samples, {} backups ({})",
