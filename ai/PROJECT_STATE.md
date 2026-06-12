@@ -1,7 +1,18 @@
 # Project State
 
 ## Current Focus
-Phase: UI skeleton (Tauri) — built, awaiting first run on host (2026-06-11)
+Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verification) (2026-06-11)
+- **Key user decision**: renders are SCATTERED across the computer (old consolidation script defunct) — discovery must NOT rely on project folders. It hunts user-chosen roots (Desktop, Downloads, ...) and name-matches against the catalog. Files never moved, only referenced.
+- **User direction**: preview GENERATION (export worker) should be an in-app feature eventually ("most people have bad habits too") — discovery is the bridge, worker is the destination. `source` column (discovered|worker|manual) exists for this.
+- [x] Schema v2 + real in-place migration (v1 catalogs upgraded, not rebuilt): previews table (set_id nullable for ambiguous project-level matches, confidence, source, peaks JSON, is_primary).
+- [x] crates/previews: render hunt (audio exts, >=1MB, skips Samples/Backup/Project Info dirs), normalizer (stopwords/vN/bpm/bracketed chunks), scorer (exact 1.0 > word-boundary prefix 0.85 > token Jaccard; project-name fallback -> single-set x0.9 else project-level x0.5), symphonia peak extraction (<=1500 bins, coarse-then-downsample, JSON).
+- [x] CLI: `previews <roots...> [--threshold 0.6] [--verbose]` (freshness-checked, decode only matches) + `attach <set> <audio>` (manual, confidence 1.0). Primary = highest confidence then newest.
+- [x] App: `preview` command; asset protocol enabled (scope **, tauri feature protocol-asset — user added the cargo feature); bottom PlayerBar (canvas waveform, click-seek, match-confidence shown when <85%); ▶ on rows with previews.
+- [ ] **NEXT (on user's Mac)**: cargo build; `ableton-scan previews <some bounce folder>` against indexed sets; check match quality (then tune threshold/stopwords); run app, play something.
+- [ ] Later in M3: previews in detail pane (list all, switch primary), historical preview archive, in-app "hunt for previews" UI.
+- [ ] M4: in-app export worker (second Live install + UI automation queue).
+
+## UI skeleton (Tauri): ✅ DONE + verified (2026-06-11)
 - [x] `indexer` refactor: `set_detail`/`resolve_set` moved into lib (shared CLI + app); Serialize on SearchHit/Stats.
 - [x] `app/src-tauri`: Tauri 2 backend, commands `search`/`inspect`/`stats` (snake_case args) over the shared catalog; bundle inactive (dev-only, no icons needed yet); workspace member.
 - [x] `app/` frontend: React 18 + Vite + TS; debounced search, bpm/plugin filters, results table, detail pane (tracks/devices/samples/locators chips), partial-catalog empty state, dark theme.

@@ -23,6 +23,12 @@ ableton-scan search --plugin soothe              # by device/plugin name
 ableton-scan inspect 42                          # full detail (by set id or path fragment)
 ableton-scan stats
 
+# hunt folders for exported renders, match them to indexed sets by name,
+# extract waveform peaks (files are never moved — only referenced)
+ableton-scan previews ~/Desktop ~/Downloads "<bounce folders...>"
+ableton-scan previews ~/Desktop --verbose      # also list unmatched files
+ableton-scan attach "522 idea" ~/Desktop/522-bounce.mp3   # manual match
+
 # one-shot JSON dump, no database (oracle-compatible output)
 # convention: redirect outputs into exports/ (gitignored)
 ableton-scan json "<root>" --pretty > exports/library.json

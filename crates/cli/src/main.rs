@@ -65,6 +65,30 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Hunt folders for exported renders and match them to indexed sets.
+    /// Files are never moved — only referenced. Matched files get waveform
+    /// peaks extracted (this reads the audio, so iCloud may download them).
+    Previews {
+        /// Folders where bounces accumulate (Desktop, Downloads, ...)
+        roots: Vec<PathBuf>,
+        /// Minimum match confidence (0..1).
+        #[arg(long, default_value_t = 0.6)]
+        threshold: f64,
+        /// List unmatched files too.
+        #[arg(long)]
+        verbose: bool,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Manually attach an audio file to a set (confidence 1.0).
+    Attach {
+        /// Set id, exact path, or path fragment.
+        set: String,
+        /// Audio file to attach.
+        audio: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
 }
 
 fn db_path(opt: Option<PathBuf>) -> Result<PathBuf> {
@@ -84,7 +108,139 @@ fn main() -> Result<()> {
         }
         Cmd::Inspect { set, db } => cmd_inspect(&set, db),
         Cmd::Stats { db } => cmd_stats(db),
+        Cmd::Previews { roots, threshold, verbose, db } => {
+            cmd_previews(&roots, threshold, verbose, db)
+        }
+        Cmd::Attach { set, audio, db } => cmd_attach(&set, &audio, db),
     }
+}
+
+/// Load matcher candidates from the catalog.
+fn set_candidates(conn: &rusqlite::Connection) -> Result<Vec<previews::matching::SetCandidate>> {
+    use previews::matching::normalize;
+    let mut out = Vec::new();
+    for (set_id, project_id, als_path, project_name, count) in
+        indexer::set_match_candidates(conn)?
+    {
+        let stem = Path::new(&als_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let proj = project_name.trim_end_matches(" Project");
+        out.push(previews::matching::SetCandidate {
+            set_id,
+            project_id,
+            norm_stem: normalize(&stem),
+            norm_project: normalize(proj),
+            project_set_count: count as usize,
+        });
+    }
+    Ok(out)
+}
+
+/// Extract peaks and build a PreviewRow (shared by previews + attach).
+fn build_preview_row(
+    audio: &Path,
+    set_id: Option<i64>,
+    project_id: Option<i64>,
+    source: &str,
+    confidence: f64,
+) -> Result<indexer::PreviewRow> {
+    let meta = std::fs::metadata(audio)?;
+    let pk = previews::peaks::extract(audio)?;
+    Ok(indexer::PreviewRow {
+        set_id,
+        project_id,
+        audio_path: std::path::absolute(audio)?.to_string_lossy().into_owned(),
+        source: source.into(),
+        confidence,
+        mtime: iso_mtime(audio)?,
+        size: meta.len(),
+        duration: Some(pk.duration_secs),
+        peaks_json: Some(previews::peaks::to_json(&pk.peaks)),
+    })
+}
+
+fn cmd_previews(
+    roots: &[PathBuf],
+    threshold: f64,
+    verbose: bool,
+    db: Option<PathBuf>,
+) -> Result<()> {
+    use previews::matching::{best_match, normalize, MatchTarget};
+    if roots.is_empty() {
+        bail!("give at least one folder to hunt for renders, e.g. ~/Desktop ~/Downloads");
+    }
+    let conn = indexer::open(&db_path(db)?)?;
+    let cands = set_candidates(&conn)?;
+    if cands.is_empty() {
+        bail!("catalog is empty — run `ableton-scan scan <root>` first");
+    }
+    let renders = previews::discover_renders(roots)?;
+    eprintln!("{} candidate audio file(s) found, matching against {} set(s)…",
+        renders.len(), cands.len());
+
+    let (mut matched, mut fresh, mut ambiguous, mut unmatched, mut errors) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
+    for r in &renders {
+        let norm = normalize(&r.stem);
+        match best_match(&norm, &cands, threshold) {
+            Some(m) => {
+                let (set_id, project_id) = match m.target {
+                    MatchTarget::Set { set_id, project_id } => (Some(set_id), Some(project_id)),
+                    MatchTarget::Project { project_id } => {
+                        ambiguous += 1;
+                        (None, Some(project_id))
+                    }
+                };
+                let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
+                let mtime = iso_mtime(&r.path)?;
+                if indexer::preview_is_fresh(&conn, set_id, &abs, r.size, &mtime)? {
+                    fresh += 1;
+                    continue;
+                }
+                match build_preview_row(&r.path, set_id, project_id, "discovered", m.confidence) {
+                    Ok(row) => {
+                        indexer::upsert_preview(&conn, &row)?;
+                        matched += 1;
+                        eprintln!(
+                            "  matched ({:.2}) {} -> set {:?}",
+                            m.confidence,
+                            r.path.display(),
+                            set_id
+                        );
+                    }
+                    Err(e) => {
+                        errors += 1;
+                        eprintln!("  ERROR decoding {}: {e}", r.path.display());
+                    }
+                }
+            }
+            None => {
+                unmatched += 1;
+                if verbose {
+                    eprintln!("  unmatched: {}", r.path.display());
+                }
+            }
+        }
+    }
+    eprintln!(
+        "previews done: {matched} matched, {fresh} unchanged, {ambiguous} project-level (ambiguous), {unmatched} unmatched, {errors} errors"
+    );
+    if unmatched > 0 && !verbose {
+        eprintln!("(rerun with --verbose to list unmatched files; use `attach` for manual fixes)");
+    }
+    Ok(())
+}
+
+fn cmd_attach(set: &str, audio: &Path, db: Option<PathBuf>) -> Result<()> {
+    let conn = indexer::open(&db_path(db)?)?;
+    let set_id = indexer::resolve_set(&conn, set)?;
+    let project_id = indexer::set_project_id(&conn, set_id)?;
+    let row = build_preview_row(audio, Some(set_id), Some(project_id), "manual", 1.0)?;
+    indexer::upsert_preview(&conn, &row)?;
+    eprintln!("attached {} to set {set_id} (primary recomputed)", audio.display());
+    Ok(())
 }
 
 fn cmd_json(root: &Path, pretty: bool) -> Result<()> {
@@ -220,6 +376,7 @@ fn cmd_stats(db: Option<PathBuf>) -> Result<()> {
     println!("devices:  {}", st.devices);
     println!("samples:  {}", st.samples);
     println!("backups:  {}", st.backups);
+    println!("previews: {}", st.previews);
     Ok(())
 }
 

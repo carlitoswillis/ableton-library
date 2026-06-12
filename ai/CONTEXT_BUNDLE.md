@@ -1,5 +1,5 @@
 # AI Context Bundle
-Generated: Thu Jun 11 23:43:06 UTC 2026
+Generated: Fri Jun 12 00:02:23 UTC 2026
 
 ## ⚠️ Agent Navigation Guide
 1. Start with the **Current State** below to understand the focus.
@@ -103,11 +103,24 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
 # Project State
 
 ## Current Focus
-Phase: UI skeleton (Tauri) — built, awaiting first run on host (2026-06-11)
+Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verification) (2026-06-11)
+- **Key user decision**: renders are SCATTERED across the computer (old consolidation script defunct) — discovery must NOT rely on project folders. It hunts user-chosen roots (Desktop, Downloads, ...) and name-matches against the catalog. Files never moved, only referenced.
+- **User direction**: preview GENERATION (export worker) should be an in-app feature eventually ("most people have bad habits too") — discovery is the bridge, worker is the destination. `source` column (discovered|worker|manual) exists for this.
+- [x] Schema v2 + real in-place migration (v1 catalogs upgraded, not rebuilt): previews table (set_id nullable for ambiguous project-level matches, confidence, source, peaks JSON, is_primary).
+- [x] crates/previews: render hunt (audio exts, >=1MB, skips Samples/Backup/Project Info dirs), normalizer (stopwords/vN/bpm/bracketed chunks), scorer (exact 1.0 > word-boundary prefix 0.85 > token Jaccard; project-name fallback -> single-set x0.9 else project-level x0.5), symphonia peak extraction (<=1500 bins, coarse-then-downsample, JSON).
+- [x] CLI: `previews <roots...> [--threshold 0.6] [--verbose]` (freshness-checked, decode only matches) + `attach <set> <audio>` (manual, confidence 1.0). Primary = highest confidence then newest.
+- [x] App: `preview` command; asset protocol enabled (scope **, tauri feature protocol-asset — user added the cargo feature); bottom PlayerBar (canvas waveform, click-seek, match-confidence shown when <85%); ▶ on rows with previews.
+- [ ] **NEXT (on user's Mac)**: cargo build; `ableton-scan previews <some bounce folder>` against indexed sets; check match quality (then tune threshold/stopwords); run app, play something.
+- [ ] Later in M3: previews in detail pane (list all, switch primary), historical preview archive, in-app "hunt for previews" UI.
+- [ ] M4: in-app export worker (second Live install + UI automation queue).
+
+## UI skeleton (Tauri): ✅ DONE + verified (2026-06-11)
 - [x] `indexer` refactor: `set_detail`/`resolve_set` moved into lib (shared CLI + app); Serialize on SearchHit/Stats.
 - [x] `app/src-tauri`: Tauri 2 backend, commands `search`/`inspect`/`stats` (snake_case args) over the shared catalog; bundle inactive (dev-only, no icons needed yet); workspace member.
 - [x] `app/` frontend: React 18 + Vite + TS; debounced search, bpm/plugin filters, results table, detail pane (tracks/devices/samples/locators chips), partial-catalog empty state, dark theme.
-- [ ] **NEXT (on user's Mac)**: `cd app && npm install && npm run tauri dev` (first run compiles Tauri ~minutes). Fix compile/runtime issues. Verify against indexed fixtures + any real folders indexed so far.
+- [x] **VERIFIED on user's Mac** (2026-06-11): app runs after icon fix ("looks great"). Note: Tauri opens its own window; localhost:1420 in a browser has no `invoke` (expected).
+- [x] Search ranking: weighted bm25 (set/project names 10/8, tracks 4, devices 1, samples 0.5) so plugin/sample hits rank below name hits (user feedback).
+- [x] "Open in Live" (rows, hover-revealed) + "Reveal in Finder" (detail pane): `open_set` command -> macOS `open` on the stored als_path (catalog paths only, existence-checked; macOS-only cfg).
 - [ ] Then (Milestone 3): previews table + discovery -> waveform peaks -> player in detail pane; later the automated Live export worker.
 
 ## Milestone 2 — Project Catalog (indexer): ✅ DONE (2026-06-11)
@@ -170,6 +183,8 @@ Phase: UI skeleton (Tauri) — built, awaiting first run on host (2026-06-11)
 - [ ] Preview archive: keep historical previews per set, potentially anchored to Backup/ timestamps (stretch; pairs with --deep backup parsing)
 - [ ] Sample `evicted` state: detect iCloud `.icloud` placeholders vs truly missing files
 - [ ] `roots` table + `rescan` subcommand (refresh all previously scanned roots)
+- [ ] UI polish pass (user verdict on skeleton: "looks great, a little bland but functional")
+- [ ] Search: consider match-source indicator in results (why did this set match?) and column-scoped queries (e.g. plugin:soothe)
 - [ ] Automatic key detection
 - [ ] Similar project search
 - [ ] Plugin inventory
@@ -190,6 +205,7 @@ Phase: UI skeleton (Tauri) — built, awaiting first run on host (2026-06-11)
 ./crates
 ./crates/als-core
 ./crates/cli
+./crates/previews
 ./crates/indexer
 ./app
 ./app/index.html
@@ -226,113 +242,113 @@ Phase: UI skeleton (Tauri) — built, awaiting first run on host (2026-06-11)
 
 ## 5. Recent Git Changes (Summary)
 ```text
+e53f74b Open in Live / Reveal in Finder: open_set command (catalog paths only), row hover button + detail actions
+ac946be Search: weighted bm25 ranking (names >> tracks >> devices/samples) per user feedback; UI verified on host
+99a98da Fix: add app icon (generate_context! requires one even in dev)
+5beacd6 Pre-UI-test housekeeping: organize gitignore (+db/vite ignores), track lockfiles, mark UI skeleton built in context
 cf796a7 UI skeleton: Tauri 2 + React app over shared indexer
-ef9aba0 M2 verified on host; decide incremental-adoption indexing strategy (defer full iCloud scan; catalog is never assumed complete)
-868a0f9 Add scan --force + schema versioning (PRAGMA user_version); refuse mismatched catalogs
-71e95d9 M2: indexer crate (SQLite+FTS5, incremental, prune) + CLI subcommands
-dbdcf2d Context audit: close fixture-version gap, retire proven risks, move Assumption C, log repo conventions; regenerate CONTEXT_BUNDLE
 ```
 
 ## 6. Active Diff
 ```diff
-diff --git a/.gitignore b/.gitignore
-index 06bb931..2b8f877 100644
---- a/.gitignore
-+++ b/.gitignore
-@@ -1,7 +1,20 @@
-+# user fixtures / outputs
- example-project-library
-+exports
-+
-+# OS
- .DS_Store
-+
-+# rust
- target/
--exports
-+
-+# frontend
- node_modules/
- dist/
- app/src-tauri/gen/
-+.vite/
-+
-+# local catalogs (the db is rebuildable cache; lives in app data dir by default)
-+*.db
-+*.db-shm
-+*.db-wal
 diff --git a/Cargo.lock b/Cargo.lock
-index 1225224..89c6175 100644
+index 89c6175..44f8a4f 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -8,16 +8,53 @@ version = "2.0.1"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+@@ -135,6 +135,12 @@ dependencies = [
+  "tauri-build",
+ ]
  
 +[[package]]
-+name = "ahash"
-+version = "0.8.12"
++name = "arrayvec"
++version = "0.7.6"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
++checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
++
+ [[package]]
+ name = "atk"
+ version = "0.18.2"
+@@ -461,6 +467,8 @@ dependencies = [
+  "clap",
+  "dirs 5.0.1",
+  "indexer",
++ "previews",
++ "rusqlite",
+  "serde_json",
+ ]
+ 
+@@ -872,6 +880,15 @@ version = "1.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
+ 
++[[package]]
++name = "encoding_rs"
++version = "0.8.35"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
 +dependencies = [
 + "cfg-if",
-+ "once_cell",
-+ "version_check",
-+ "zerocopy",
-+]
-+
-+[[package]]
-+name = "aho-corasick"
-+version = "1.1.4"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
-+dependencies = [
-+ "memchr",
-+]
-+
-+[[package]]
-+name = "alloc-no-stdlib"
-+version = "2.0.4"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
-+
-+[[package]]
-+name = "alloc-stdlib"
-+version = "0.2.2"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "94fb8275041c72129eb51b7d0322c29b8387a0386127718b096429201a5d6ece"
-+dependencies = [
-+ "alloc-no-stdlib",
 +]
 +
  [[package]]
- name = "als-core"
+ name = "equivalent"
+ version = "1.0.2"
+@@ -889,6 +906,12 @@ dependencies = [
+  "typeid",
+ ]
+ 
++[[package]]
++name = "extended"
++version = "0.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
++
+ [[package]]
+ name = "fallible-iterator"
+ version = "0.3.0"
+@@ -1460,6 +1483,12 @@ dependencies = [
+  "pin-project-lite",
+ ]
+ 
++[[package]]
++name = "http-range"
++version = "0.1.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "21dec9db110f5f872ed9699c3ecf50cf16f423502706ba5c72462e28d3157573"
++
+ [[package]]
+ name = "httparse"
+ version = "1.10.1"
+@@ -1830,6 +1859,12 @@ dependencies = [
+  "unicode-segmentation",
+ ]
+ 
++[[package]]
++name = "lazy_static"
++version = "1.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
++
+ [[package]]
+ name = "leb128fmt"
  version = "0.1.0"
- dependencies = [
-  "chrono",
-  "flate2",
-- "quick-xml",
-+ "quick-xml 0.36.2",
-  "serde",
-  "sha2",
-- "thiserror",
-+ "thiserror 1.0.69",
+@@ -2469,6 +2504,16 @@ dependencies = [
+  "syn 2.0.117",
+ ]
+ 
++[[package]]
++name = "previews"
++version = "0.1.0"
++dependencies = [
++ "anyhow",
++ "serde_json",
++ "symphonia",
 + "walkdir",
- ]
- 
++]
++
  [[package]]
-@@ -65,7 +102,7 @@ version = "1.1.5"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
- dependencies = [
-- "windows-sys",
-+ "windows-sys 0.61.2",
- ]
- 
- [[package]]
-@@ -76,7 +113,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
- dependencies = [
-  "anstyle",
-  "once_cell_polyfill",
-- "windows-sys",
+ name = "proc-macro-crate"
+ version = "1.3.1"
+@@ -3124,6 +3169,178 @@ dependencies = [
+  "serde_json",
 ```

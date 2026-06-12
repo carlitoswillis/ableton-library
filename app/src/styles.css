@@ -281,6 +281,89 @@ header h1 {
   margin-top: 10px;
 }
 
+.play-btn {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  margin-right: 6px;
+}
+
+.play-btn:hover {
+  background: var(--accent);
+  color: #16161a;
+}
+
+.results tr .play-btn {
+  visibility: visible; /* preview availability is information — always show */
+}
+
+.player {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.play-toggle {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: #16161a;
+  font-size: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.player-info {
+  width: 200px;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.player-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.player-sub {
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.waveform {
+  flex: 1;
+  height: 44px;
+  cursor: pointer;
+}
+
+.player-time {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.player-close {
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 16px;
+  cursor: pointer;
+}
+
 .chip.midi { background: var(--midi); }
 .chip.audio { background: var(--audio); }
 .chip.return { background: var(--return); }

@@ -48,6 +48,31 @@ fn stats() -> Result<indexer::Stats, String> {
     indexer::stats(&conn).map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+struct PreviewInfo {
+    audio_path: String,
+    duration: Option<f64>,
+    peaks: serde_json::Value,
+    confidence: f64,
+    source: String,
+}
+
+/// Primary preview (audio path + waveform peaks) for a set, if any.
+#[tauri::command(rename_all = "snake_case")]
+fn preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let row = indexer::primary_preview(&conn, set_id).map_err(|e| e.to_string())?;
+    Ok(row.map(|(audio_path, duration, peaks_json, confidence, source)| PreviewInfo {
+        audio_path,
+        duration,
+        peaks: peaks_json
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or(serde_json::Value::Array(vec![])),
+        confidence,
+        source,
+    }))
+}
+
 /// Open the set in Ableton Live (default .als handler), or reveal it in Finder.
 /// Only ever opens paths stored in the catalog — never arbitrary input.
 #[tauri::command(rename_all = "snake_case")]
@@ -75,7 +100,7 @@ fn open_set(set_id: i64, reveal: bool) -> Result<(), String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![search, inspect, stats, open_set])
+        .invoke_handler(tauri::generate_handler![search, inspect, stats, open_set, preview])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

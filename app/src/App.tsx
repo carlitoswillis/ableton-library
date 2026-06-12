@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import PlayerBar, { PlayerTrack } from "./PlayerBar";
 
 type SearchHit = {
   set_id: number;
@@ -8,6 +9,8 @@ type SearchHit = {
   tempo: number | null;
   time_signature: string | null;
   live_version: string | null;
+  has_preview: boolean;
+  preview_duration: number | null;
 };
 
 type Stats = {
@@ -17,6 +20,15 @@ type Stats = {
   devices: number;
   samples: number;
   backups: number;
+  previews: number;
+};
+
+type PreviewInfo = {
+  audio_path: string;
+  duration: number | null;
+  peaks: number[];
+  confidence: number;
+  source: string;
 };
 
 type Detail = {
@@ -44,6 +56,7 @@ export default function App() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [track, setTrack] = useState<PlayerTrack | null>(null);
 
   const runSearch = useCallback(async () => {
     try {
@@ -82,6 +95,27 @@ export default function App() {
     try {
       setError(null);
       await invoke("open_set", { set_id: id, reveal });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const playPreview = async (h: SearchHit) => {
+    try {
+      setError(null);
+      const p = await invoke<PreviewInfo | null>("preview", { set_id: h.set_id });
+      if (!p) {
+        setError("No preview for this set yet — run `ableton-scan previews <folders>`.");
+        return;
+      }
+      setTrack({
+        setId: h.set_id,
+        title: fileName(h.als_path).replace(/\.als$/, ""),
+        subtitle: `${h.project} · ${p.source}${p.confidence < 0.85 ? ` (${Math.round(p.confidence * 100)}% match)` : ""}`,
+        src: convertFileSrc(p.audio_path),
+        peaks: p.peaks,
+        duration: p.duration,
+      });
     } catch (e) {
       setError(String(e));
     }
@@ -153,6 +187,18 @@ export default function App() {
                   <td className="num">{h.time_signature ?? "?"}</td>
                   <td className="ver">{h.live_version?.replace("Ableton Live ", "") ?? ""}</td>
                   <td className="act">
+                    {h.has_preview && (
+                      <button
+                        className="play-btn"
+                        title="Play preview"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          playPreview(h);
+                        }}
+                      >
+                        ▶
+                      </button>
+                    )}
                     <button
                       className="open-btn"
                       title="Open in Ableton Live"
@@ -239,6 +285,8 @@ export default function App() {
           </aside>
         )}
       </div>
+
+      {track && <PlayerBar track={track} onClose={() => setTrack(null)} />}
     </div>
   );
 }

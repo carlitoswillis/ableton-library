@@ -82,12 +82,31 @@ CREATE INDEX IF NOT EXISTS idx_samples_path   ON samples(path);
 CREATE INDEX IF NOT EXISTS idx_backups_proj   ON backups(project_id);
 "#;
 
-/// Bump when the schema changes incompatibly. open() refuses mismatched dbs
-/// so stale catalogs are rebuilt (delete db or `scan --force`) instead of
-/// being silently misread.
-pub const SCHEMA_VERSION: i32 = 1;
+/// v2: previews. set_id NULL = project-level (ambiguous) preview.
+const SCHEMA_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS previews (
+    id         INTEGER PRIMARY KEY,
+    set_id     INTEGER REFERENCES sets(id) ON DELETE CASCADE,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    audio_path TEXT NOT NULL,
+    source     TEXT NOT NULL,              -- discovered | worker | manual
+    confidence REAL NOT NULL,
+    mtime      TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    duration   REAL,
+    peaks      TEXT,                       -- JSON array of 0..1 floats
+    is_primary INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_previews_set  ON previews(set_id);
+CREATE INDEX IF NOT EXISTS idx_previews_proj ON previews(project_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_previews_set_path ON previews(set_id, audio_path);
+"#;
 
-/// Open (creating if needed) the index database.
+/// Current schema version. Migrations upgrade older catalogs in place;
+/// catalogs NEWER than this build are refused.
+pub const SCHEMA_VERSION: i32 = 2;
+
+/// Open (creating if needed) the index database, migrating if needed.
 pub fn open(db_path: &Path) -> Result<Connection> {
     if let Some(dir) = db_path.parent() {
         std::fs::create_dir_all(dir)
@@ -98,20 +117,29 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
-    let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version == 0 {
-        // New (or pre-versioning) db: create schema and stamp it.
-        conn.execute_batch(SCHEMA)?;
-        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
-    } else if version != SCHEMA_VERSION {
+    let mut version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version > SCHEMA_VERSION {
         anyhow::bail!(
-            "catalog {} has schema v{version}, this build expects v{SCHEMA_VERSION} — \
-             delete the db and rescan (it is fully rebuildable from your .als files)",
+            "catalog {} has schema v{version}, this build only knows v{SCHEMA_VERSION} — \
+             update the app, or delete the db and rescan (it is rebuildable from your .als files)",
             db_path.display()
         );
-    } else {
-        conn.execute_batch(SCHEMA)?; // idempotent (IF NOT EXISTS)
     }
+    if version == 0 {
+        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(SCHEMA_V2)?;
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+        return Ok(conn);
+    }
+    // In-place migrations (each block is additive and idempotent).
+    if version == 1 {
+        conn.execute_batch(SCHEMA_V2)?;
+        version = 2;
+        conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
+    }
+    debug_assert_eq!(version, SCHEMA_VERSION);
+    conn.execute_batch(SCHEMA)?; // idempotent (IF NOT EXISTS)
+    conn.execute_batch(SCHEMA_V2)?;
     Ok(conn)
 }
 
@@ -289,6 +317,95 @@ pub fn prune_missing(conn: &Connection, root_prefix: &str, seen: &HashSet<String
     Ok(removed)
 }
 
+/// A render attached to a set (or project, when ambiguous).
+pub struct PreviewRow {
+    pub set_id: Option<i64>,
+    pub project_id: Option<i64>,
+    pub audio_path: String,
+    pub source: String,
+    pub confidence: f64,
+    pub mtime: String,
+    pub size: u64,
+    pub duration: Option<f64>,
+    /// JSON array of 0..1 floats (waveform bins), already serialized.
+    pub peaks_json: Option<String>,
+}
+
+/// True if a preview row for (set_id, audio_path) exists with same size+mtime.
+pub fn preview_is_fresh(
+    conn: &Connection,
+    set_id: Option<i64>,
+    audio_path: &str,
+    size: u64,
+    mtime: &str,
+) -> Result<bool> {
+    let row: Option<(u64, String)> = conn
+        .query_row(
+            "SELECT size, mtime FROM previews WHERE audio_path = ?2
+             AND ((?1 IS NULL AND set_id IS NULL) OR set_id = ?1)",
+            params![set_id, audio_path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?;
+    Ok(row.map_or(false, |(s, m)| s == size && m == mtime))
+}
+
+/// Insert or replace a preview row, then recompute the set's primary.
+pub fn upsert_preview(conn: &Connection, p: &PreviewRow) -> Result<()> {
+    conn.execute(
+        "DELETE FROM previews WHERE audio_path = ?2
+         AND ((?1 IS NULL AND set_id IS NULL) OR set_id = ?1)",
+        params![p.set_id, p.audio_path],
+    )?;
+    conn.execute(
+        "INSERT INTO previews (set_id, project_id, audio_path, source, confidence,
+                               mtime, size, duration, peaks, is_primary)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)",
+        params![
+            p.set_id, p.project_id, p.audio_path, p.source, p.confidence,
+            p.mtime, p.size, p.duration, p.peaks_json
+        ],
+    )?;
+    if let Some(set_id) = p.set_id {
+        recompute_primary(conn, set_id)?;
+    }
+    Ok(())
+}
+
+/// Primary = highest confidence, newest file.
+pub fn recompute_primary(conn: &Connection, set_id: i64) -> Result<()> {
+    conn.execute("UPDATE previews SET is_primary = 0 WHERE set_id = ?1", params![set_id])?;
+    conn.execute(
+        "UPDATE previews SET is_primary = 1 WHERE id =
+           (SELECT id FROM previews WHERE set_id = ?1
+            ORDER BY confidence DESC, mtime DESC LIMIT 1)",
+        params![set_id],
+    )?;
+    Ok(())
+}
+
+/// Primary preview for a set: (audio_path, duration, peaks_json, confidence, source).
+pub fn primary_preview(
+    conn: &Connection,
+    set_id: i64,
+) -> Result<Option<(String, Option<f64>, Option<String>, f64, String)>> {
+    conn.query_row(
+        "SELECT audio_path, duration, peaks, confidence, source
+         FROM previews WHERE set_id = ?1 AND is_primary = 1",
+        params![set_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        e => Err(e.into()),
+    })
+}
+
 pub struct SearchOpts {
     pub text: Option<String>,
     pub min_bpm: Option<f64>,
@@ -304,6 +421,8 @@ pub struct SearchHit {
     pub tempo: Option<f64>,
     pub time_signature: Option<String>,
     pub live_version: Option<String>,
+    pub has_preview: bool,
+    pub preview_duration: Option<f64>,
 }
 
 pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
@@ -312,10 +431,12 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
     // (set/project names matter most; a plugin or sample hit still surfaces,
     // just far below sets that match by name.)
     let sql = if o.text.is_some() {
-        "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version
+        "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version,
+                pv.audio_path, pv.duration
          FROM search f
          JOIN sets s ON s.id = f.set_id
          JOIN projects p ON p.id = s.project_id
+         LEFT JOIN previews pv ON pv.set_id = s.id AND pv.is_primary = 1
          WHERE f.search MATCH ?1
            AND (?2 IS NULL OR s.tempo >= ?2)
            AND (?3 IS NULL OR s.tempo <= ?3)
@@ -324,8 +445,11 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
                                         AND d.name LIKE '%' || ?4 || '%'))
          ORDER BY bm25(f.search, 0.0, 8.0, 10.0, 4.0, 1.0, 0.5), p.name, s.als_path"
     } else {
-        "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version
-         FROM sets s JOIN projects p ON p.id = s.project_id
+        "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version,
+                pv.audio_path, pv.duration
+         FROM sets s
+         JOIN projects p ON p.id = s.project_id
+         LEFT JOIN previews pv ON pv.set_id = s.id AND pv.is_primary = 1
          WHERE ?1 IS NULL
            AND (?2 IS NULL OR s.tempo >= ?2)
            AND (?3 IS NULL OR s.tempo <= ?3)
@@ -338,6 +462,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
     let rows = stmt.query_map(
         params![o.text, o.min_bpm, o.max_bpm, o.plugin],
         |r| {
+            let preview_path: Option<String> = r.get(6)?;
             Ok(SearchHit {
                 set_id: r.get(0)?,
                 project: r.get(1)?,
@@ -345,6 +470,8 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
                 tempo: r.get(3)?,
                 time_signature: r.get(4)?,
                 live_version: r.get(5)?,
+                has_preview: preview_path.is_some(),
+                preview_duration: r.get(7)?,
             })
         },
     )?;
@@ -359,6 +486,7 @@ pub struct Stats {
     pub devices: i64,
     pub samples: i64,
     pub backups: i64,
+    pub previews: i64,
 }
 
 /// Resolve a set reference: numeric id, exact als_path, or path fragment.
@@ -374,6 +502,30 @@ pub fn resolve_set(conn: &Connection, query: &str) -> Result<i64> {
             |r| r.get(0),
         )
         .with_context(|| format!("no set matching '{query}'"))?)
+}
+
+/// Raw matcher inputs: (set_id, project_id, als_path, project_name, project_set_count).
+pub fn set_match_candidates(conn: &Connection) -> Result<Vec<(i64, i64, String, String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.id, p.id, s.als_path, p.name,
+                (SELECT COUNT(*) FROM sets s2 WHERE s2.project_id = p.id)
+         FROM sets s JOIN projects p ON p.id = s.project_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The project a set belongs to.
+pub fn set_project_id(conn: &Connection, set_id: i64) -> Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT project_id FROM sets WHERE id = ?1",
+            params![set_id],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("no set with id {set_id}"))?)
 }
 
 /// The stored als_path for one set.
@@ -471,5 +623,6 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
         devices: count("SELECT COUNT(*) FROM devices")?,
         samples: count("SELECT COUNT(*) FROM samples")?,
         backups: count("SELECT COUNT(*) FROM backups")?,
+        previews: count("SELECT COUNT(*) FROM previews")?,
     })
 }
