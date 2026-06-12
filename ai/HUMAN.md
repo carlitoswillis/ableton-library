@@ -5,8 +5,8 @@ Welcome to the roadmap! This document is designed for quick human reading to see
 ---
 
 ## 🚦 Current Status
-* **Phase**: **Milestone 4 — Export Worker** (Completed & Integrated)
-* **Status**: SQLite database schema migrations, dynamic Live application resolution, background worker loops, macOS AppleScript automation script (`tools/export_set.py`), and a beautiful real-time React Render Queue dashboard/modal are **fully implemented and verified**.
+* **Phase**: **Milestone 4 — Export Worker** (⚡ In Progress — mechanism built, real-world rendering is the hard part)
+* **Status**: The machinery works (worker loop, `tools/export_set.py` automation, Render Queue UI). But field testing against old projects exposed the real problems: iCloud-evicted samples stall or slow bounces badly; old sets reference missing plugins and moved samples (Live can relocate them but only via slow scanning on open) — so bounces can take forever AND still come out missing a ton of audio. M4 is **in progress** until renders of imperfect projects are acceptable.
 
 ---
 
@@ -35,11 +35,18 @@ Welcome to the roadmap! This document is designed for quick human reading to see
   * 🔄 **`roots` table & rescan**: Remember all folders that have been scanned in a database table so they can be refreshed at the click of a button.
   * ☁️ **iCloud `evicted` sample state**: Differentiate between truly missing samples and cloud-only placeholder `.icloud` files.
 
-### ✅ Milestone 4: Export Worker (Flagship Automation) — *Complete*
+### ⚡ Milestone 4: Export Worker (Flagship Automation) — *In Progress*
 * **Goal**: Automatically render previews for sets that don't have existing renders.
-* **Status**: **Complete & Integrated** (Python GUI automation script `tools/export_set.py` integrated into a Rust background worker. Frontend Render Queue UI provides start/pause toggles, status feedback, dynamic header updates, and real-time refresh).
-* **Up Next (Backlog)**:
-  * 🔄 **Overwrite confirmation**: Handle overwrite/replace confirmation dialogs in UI scripting if pre-deletion fails or if other file conflicts occur.
+* **Built**: Python GUI automation script `tools/export_set.py` integrated into a Rust background worker; Render Queue UI with start/pause, status feedback, real-time refresh.
+* **Field findings (2026-06-12, the hard part)**: old projects render slowly and incompletely —
+  * iCloud-evicted samples stall bounces (download-on-touch) or silently slow them to a crawl.
+  * Missing third-party plugins (incl. synths) = silent tracks in the render.
+  * Samples moved-but-findable: Live relocates them via slow scanning on open; un-relinked refs still cost time or come out missing.
+* **Plan (phased)**:
+  * **M4a — Triage & fidelity (catalog-driven, no .als modification)**: per-set *renderability score* from data we already have (missing plugins? missing/evicted samples?); worker queue ordered easy-first; pre-flight `brctl download` of a project's iCloud samples before bouncing; store *fidelity metadata* on worker previews ("rendered missing: Serum, soothe2") and show it in the UI.
+  * **M4b — Preview-proxy sets (writes a COPY, never the original)**: generate `<name> (preview proxy).als` with (1) missing *effects* bypassed/removed, (2) sample FileRefs relinked to copies our catalog/filename-search can locate (skips Live's slow relocate scan). Render the proxy.
+  * **M4c — Instrument stand-ins (experimental)**: substitute missing *synths* with a built-in instrument so MIDI tracks aren't silent. ⚠️ Honest limit: third-party plugin state in .als is an opaque binary blob — we can NEVER recover what the patch sounded like. Stand-ins = category guess from track/device name ("bass" -> bass-ish native preset), i.e. "hear the notes," not "hear the sound."
+* **Backlog**: overwrite-confirmation dialog handling in UI scripting.
 
 ---
 
