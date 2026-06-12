@@ -919,12 +919,89 @@ pub struct Suggestion {
     pub current_preview: Option<String>,
 }
 
-pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
-    // 1. List watch folders
-    let watch_folders = indexer::list_watch_folders(conn)?;
-    if watch_folders.is_empty() {
-        return Ok(Vec::new());
+/// Context shared by every suggestion source (watch folders, project folders).
+struct SuggestCtx<'a> {
+    previewed_projects: HashSet<i64>,
+    known_samples: HashSet<String>,
+    primary_cache: std::collections::HashMap<i64, Option<String>>,
+    /// (set_id, lowercased audio path) already emitted — dedupes across sources.
+    seen: HashSet<(i64, String)>,
+    out: &'a mut Vec<Suggestion>,
+}
+
+/// Validate + push one candidate (shared by all suggestion sources).
+fn push_suggestion(
+    conn: &Connection,
+    ctx: &mut SuggestCtx,
+    set_id: i64,
+    project_id: i64,
+    render: &previews::RenderFile,
+    abs: String,
+    confidence: f64,
+) -> Result<()> {
+    let key = (set_id, path_key(&abs));
+    if ctx.seen.contains(&key) {
+        return Ok(());
     }
+    if indexer::is_match_ignored(conn, set_id, &abs)? {
+        return Ok(());
+    }
+    // Already a preview for this set? Nothing to suggest.
+    let already_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM previews WHERE set_id = ?1 AND audio_path = ?2 COLLATE NOCASE",
+        rusqlite::params![set_id, abs],
+        |row| row.get(0),
+    )?;
+    if already_exists > 0 {
+        return Ok(());
+    }
+
+    let (als_path, project_name): (String, String) = conn.query_row(
+        "SELECT s.als_path, p.name FROM sets s JOIN projects p ON p.id = s.project_id WHERE s.id = ?1",
+        rusqlite::params![set_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let set_name = Path::new(&als_path)
+        .file_name()
+        .map(|x| x.to_string_lossy().into_owned())
+        .unwrap_or_else(|| als_path.clone());
+
+    let file_name = render
+        .path
+        .file_name()
+        .map(|x| x.to_string_lossy().into_owned())
+        .unwrap_or_else(|| abs.clone());
+
+    let current_preview = ctx
+        .primary_cache
+        .entry(set_id)
+        .or_insert_with(|| {
+            indexer::primary_preview(conn, set_id)
+                .ok()
+                .flatten()
+                .map(|(path, ..)| path)
+        })
+        .clone();
+
+    let has_preview = ctx.previewed_projects.contains(&project_id);
+    ctx.seen.insert(key);
+    ctx.out.push(Suggestion {
+        set_id,
+        set_name,
+        project_name,
+        audio_path: abs,
+        file_name,
+        confidence,
+        has_preview,
+        current_preview,
+    });
+    Ok(())
+}
+
+pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
+    // 1. List watch folders (may be empty — project folders are also scanned)
+    let watch_folders = indexer::list_watch_folders(conn)?;
 
     // 2. Discover audio files in watch folders
     let roots: Vec<PathBuf> = watch_folders.iter().map(|(_, p)| PathBuf::from(p)).collect();
@@ -958,71 +1035,84 @@ pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
 
     // 4. Match
     let mut suggestions = Vec::new();
-    let known_samples = lowercase_paths(indexer::all_sample_paths(conn)?);
-    // Cache each set's current primary preview path (shown for reconsideration).
-    let mut primary_cache: std::collections::HashMap<i64, Option<String>> =
-        std::collections::HashMap::new();
+    let mut ctx = SuggestCtx {
+        previewed_projects,
+        known_samples: lowercase_paths(indexer::all_sample_paths(conn)?),
+        primary_cache: std::collections::HashMap::new(),
+        seen: HashSet::new(),
+        out: &mut suggestions,
+    };
 
+    // Source A: watch-folder renders, matched against the whole catalog.
     for r in &renders {
         let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
-        if known_samples.contains(&path_key(&abs)) {
+        if ctx.known_samples.contains(&path_key(&abs)) {
             continue;
         }
-
         if let Some(m) = best_match(&normalize(&r.stem), &cands, 0.6) {
             if let MatchTarget::Set { set_id, project_id } = m.target {
-                // Check if this match is ignored in database
-                if indexer::is_match_ignored(conn, set_id, &abs)? {
-                    continue;
-                }
-
-                // Check if this audio path is already a preview for this set (just in case)
-                let already_exists: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM previews WHERE set_id = ?1 AND audio_path = ?2 COLLATE NOCASE",
-                    rusqlite::params![set_id, abs],
-                    |row| row.get(0),
-                )?;
-                if already_exists > 0 {
-                    continue;
-                }
-
-                // Get details about this set
-                let (als_path, project_name): (String, String) = conn.query_row(
-                    "SELECT s.als_path, p.name FROM sets s JOIN projects p ON p.id = s.project_id WHERE s.id = ?1",
-                    rusqlite::params![set_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )?;
-
-                let set_name = Path::new(&als_path)
-                    .file_name()
-                    .map(|x| x.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| als_path.clone());
-
-                let file_name = r.path.file_name()
-                    .map(|x| x.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| abs.clone());
-
-                let current_preview = primary_cache
-                    .entry(set_id)
-                    .or_insert_with(|| {
-                        indexer::primary_preview(conn, set_id)
-                            .ok()
-                            .flatten()
-                            .map(|(path, ..)| path)
-                    })
-                    .clone();
-
-                suggestions.push(Suggestion {
-                    set_id,
-                    set_name,
-                    project_name,
-                    audio_path: abs,
-                    file_name,
-                    confidence: m.confidence,
-                    has_preview: previewed_projects.contains(&project_id),
-                    current_preview,
-                });
+                push_suggestion(conn, &mut ctx, set_id, project_id, r, abs, m.confidence)?;
             }
+        }
+    }
+
+    // Source B (user request 2026-06-11): renders living INSIDE indexed
+    // project folders — the original scan's territory — surface here too.
+    // Matching is local to each project's sets (folder placement = signal),
+    // same rules as the in-folder harvest (+0.05 bonus, single-set 0.7
+    // fallback). Anything already attached is filtered by push_suggestion.
+    let projects: Vec<(i64, String, String)> = {
+        let mut stmt = conn.prepare("SELECT id, folder_path, name FROM projects")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    for (pid, folder, pname) in projects {
+        let dir = Path::new(&folder);
+        if !dir.is_dir() {
+            continue;
+        }
+        let sets = indexer::project_sets(conn, pid)?;
+        if sets.is_empty() {
+            continue;
+        }
+        let norm_project = normalize(pname.trim_end_matches(" Project"));
+        let local_cands: Vec<SetCandidate> = sets
+            .iter()
+            .map(|(set_id, als_path)| SetCandidate {
+                set_id: *set_id,
+                project_id: pid,
+                norm_stem: normalize(
+                    &Path::new(als_path)
+                        .file_stem()
+                        .map(|x| x.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                ),
+                norm_project: norm_project.clone(),
+                project_set_count: sets.len(),
+            })
+            .collect();
+
+        for r in previews::discover_renders(&[dir.to_path_buf()], Some(2))? {
+            let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
+            if ctx.known_samples.contains(&path_key(&abs)) {
+                continue;
+            }
+            let (set_id, project_id, confidence) =
+                match best_match(&normalize(&r.stem), &local_cands, 0.6) {
+                    Some(m) => match m.target {
+                        MatchTarget::Set { set_id, project_id } => {
+                            (set_id, project_id, (m.confidence + 0.05).min(1.0))
+                        }
+                        // Ambiguous project-level match: not actionable as a
+                        // per-set suggestion, skip.
+                        MatchTarget::Project { .. } => continue,
+                    },
+                    None if sets.len() == 1 => (sets[0].0, pid, 0.7),
+                    None => continue,
+                };
+            push_suggestion(conn, &mut ctx, set_id, project_id, &r, abs, confidence)?;
         }
     }
 
