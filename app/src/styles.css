@@ -265,7 +265,7 @@ header h1 {
 }
 
 .results td.act {
-  width: 56px;
+  width: 210px;
   text-align: right;
   padding-right: 14px;
 }
@@ -293,11 +293,6 @@ header h1 {
 }
 
 .results tr .open-btn {
-  visibility: hidden;
-}
-
-.results tr:hover .open-btn,
-.results tr.selected .open-btn {
   visibility: visible;
 }
 
@@ -837,4 +832,34 @@ input:checked + .slider:before {
 .open-btn.warning {
   background: #ffd966;
   color: #16161a;
+}
+
+/* Custom Matte Sort Dropdown Select */
+.sort-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: #1a1a20;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239a9aa5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px;
+  border: 1px solid #282830;
+  border-radius: 6px;
+  color: #a0a0b0;
+  padding: 7px 32px 7px 10px;
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.sort-select:hover {
+  background-color: #202028;
+  border-color: #383845;
+  color: var(--text);
+}
+
+.sort-select:focus {
+  border-color: var(--accent);
+  background-color: #1e1e26;
 }

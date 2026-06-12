@@ -17,6 +17,15 @@ def run_applescript(script_content):
     stdout, stderr = process.communicate(script_content)
     return process.returncode, stdout, stderr
 
+def is_live_running():
+    """Check if the Ableton Live process is running on macOS."""
+    try:
+        res = subprocess.run(["pgrep", "-x", "Live"], capture_output=True)
+        return res.returncode == 0
+    except Exception:
+        # Fallback to True to avoid false negatives in case of command failure
+        return True
+
 def generate_applescript(set_path, output_dir, output_filename, live_app, set_stem):
     # Escape double quotes for AppleScript
     escaped_set_path = set_path.replace('"', '\\"')
@@ -160,6 +169,10 @@ def main():
         if os.path.exists(output_file):
             created = True
             break
+        # If Ableton Live is closed during wait, abort immediately
+        if not is_live_running():
+            print("Error: Ableton Live was closed or crashed during rendering.", file=sys.stderr)
+            sys.exit(1)
         time.sleep(1)
         
     if not created:
@@ -172,6 +185,10 @@ def main():
     stable_ticks = 0
     
     while time.time() - start_time < timeout:
+        # If Ableton Live is closed during finalize, abort
+        if not is_live_running():
+            print("Error: Ableton Live was closed or crashed during finalizing.", file=sys.stderr)
+            sys.exit(1)
         try:
             current_size = os.path.getsize(output_file)
             if current_size > 0 and current_size == last_size:

@@ -23,6 +23,9 @@ async fn search(
     min_bpm: Option<f64>,
     max_bpm: Option<f64>,
     plugin: Option<String>,
+    sort_by: Option<String>,
+    date_modified: Option<String>,
+    date_scanned: Option<String>,
 ) -> Result<Vec<indexer::SearchHit>, String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
     indexer::search(
@@ -32,6 +35,9 @@ async fn search(
             min_bpm,
             max_bpm,
             plugin: none_if_blank(plugin),
+            sort_by: none_if_blank(sort_by),
+            date_modified: none_if_blank(date_modified),
+            date_scanned: none_if_blank(date_scanned),
         },
     )
     .map_err(|e| e.to_string())
@@ -63,16 +69,25 @@ struct PreviewInfo {
 async fn preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
     let row = indexer::primary_preview(&conn, set_id).map_err(|e| e.to_string())?;
-    Ok(row.map(|(audio_path, duration, peaks_json, confidence, source)| PreviewInfo {
-        audio_path,
-        duration,
-        peaks: peaks_json
-            .and_then(|j| serde_json::from_str(&j).ok())
-            .unwrap_or(serde_json::Value::Array(vec![])),
-        confidence,
-        source,
-    }))
+    if let Some((audio_path, duration, peaks_json, confidence, source)) = row {
+        if !std::path::Path::new(&audio_path).exists() {
+            let _ = indexer::remove_preview(&conn, set_id);
+            return Err("Preview file was missing from disk and has been removed from the database.".to_string());
+        }
+        Ok(Some(PreviewInfo {
+            audio_path,
+            duration,
+            peaks: peaks_json
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or(serde_json::Value::Array(vec![])),
+            confidence,
+            source,
+        }))
+    } else {
+        Ok(None)
+    }
 }
+
 
 use tauri::Emitter;
 
@@ -125,6 +140,12 @@ async fn remove_from_export_queue(job_id: i64) -> Result<(), String> {
 async fn clear_completed_jobs() -> Result<(), String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
     indexer::clear_completed_export_jobs(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn retry_failed_jobs() -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::retry_failed_export_jobs(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -349,12 +370,25 @@ async fn open_set(set_id: i64, reveal: bool) -> Result<(), String> {
     }
 }
 
+#[tauri::command(rename_all = "snake_case")]
+async fn remove_preview(set_id: i64) -> Result<bool, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let deleted = indexer::remove_preview(&conn, set_id).map_err(|e| e.to_string())?;
+    Ok(deleted.is_some())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(ScanState::default())
         .manage(ExportState::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            if let Ok(db) = db_path() {
+                if let Ok(conn) = indexer::open(&db) {
+                    let _ = indexer::reset_stale_export_jobs(&conn);
+                    let _ = indexer::prune_stale_previews(&conn);
+                }
+            }
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 export_worker_loop(app_handle).await;
@@ -364,8 +398,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             search, inspect, stats, open_set, preview, scan_folder, cancel_scan,
             add_to_export_queue, get_export_queue, remove_from_export_queue,
-            clear_completed_jobs, toggle_export_queue, get_export_queue_active
+            clear_completed_jobs, toggle_export_queue, get_export_queue_active,
+            retry_failed_jobs, remove_preview
         ])
+
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -80,8 +80,13 @@ pub fn scan_library(
             }
         }
     }
+    let stale_previews = indexer::prune_stale_previews(conn)?;
+    for (_, path) in stale_previews {
+        log(format!("preview removed (missing from disk): {}", path));
+    }
     s.pruned = indexer::prune_missing(conn, &root_abs.to_string_lossy(), &seen)?;
     conn.execute_batch("COMMIT")?;
+
 
     // Harvest pass: renders sitting inside project folders are near-certain
     // matches (folder placement is the signal). Runs after commit so the

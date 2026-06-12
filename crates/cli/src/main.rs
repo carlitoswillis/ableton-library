@@ -243,7 +243,15 @@ fn cmd_search(
     let conn = indexer::open(&db_path(db)?)?;
     let hits = indexer::search(
         &conn,
-        &indexer::SearchOpts { text, min_bpm, max_bpm, plugin },
+        &indexer::SearchOpts {
+            text,
+            min_bpm,
+            max_bpm,
+            plugin,
+            sort_by: None,
+            date_modified: None,
+            date_scanned: None,
+        },
     )?;
     for h in &hits {
         let file = Path::new(&h.als_path)

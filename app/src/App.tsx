@@ -65,6 +65,9 @@ type Detail = {
   devices: { track: string | null; kind: string; name: string | null; manufacturer: string | null }[];
   samples: { path: string; in_project: number; exists_on_disk: number }[];
   locators: { name: string | null; time: number | null }[];
+  has_preview?: boolean;
+  preview_path?: string | null;
+  preview_missing?: boolean;
 };
 
 const fileName = (p: string) => p.split("/").pop() ?? p;
@@ -79,6 +82,9 @@ export default function App() {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [track, setTrack] = useState<PlayerTrack | null>(null);
+  const [sortBy, setSortBy] = useState("modified");
+  const [dateModified, setDateModified] = useState("");
+  const [dateScanned, setDateScanned] = useState("");
   const [scanning, setScanning] = useState(false);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
   const [scanLogs, setScanLogs] = useState<string[]>([]);
@@ -103,12 +109,15 @@ export default function App() {
         min_bpm: minBpm ? parseFloat(minBpm) : null,
         max_bpm: maxBpm ? parseFloat(maxBpm) : null,
         plugin: plugin || null,
+        sort_by: sortBy || null,
+        date_modified: dateModified || null,
+        date_scanned: dateScanned || null,
       });
       setHits(res);
     } catch (e) {
       setError(String(e));
     }
-  }, [text, minBpm, maxBpm, plugin]);
+  }, [text, minBpm, maxBpm, plugin, sortBy, dateModified, dateScanned]);
 
   // Debounced live search.
   useEffect(() => {
@@ -157,6 +166,17 @@ export default function App() {
     try {
       setError(null);
       await invoke("clear_completed_jobs");
+      refreshQueue();
+      refreshStats();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const retryFailed = async () => {
+    try {
+      setError(null);
+      await invoke("retry_failed_jobs");
       refreshQueue();
       refreshStats();
     } catch (e) {
@@ -292,11 +312,34 @@ export default function App() {
 
   const openDetail = async (id: number) => {
     try {
-      setDetail(await invoke<Detail>("inspect", { set_id: id }));
+      const d = await invoke<Detail>("inspect", { set_id: id });
+      setDetail(d);
+      if (d.preview_missing) {
+        setError("Note: The preview file was missing from disk and has been removed from the database.");
+        runSearch();
+        refreshStats();
+      }
     } catch (e) {
       setError(String(e));
     }
   };
+
+  const removePreview = async (setId: number) => {
+    try {
+      setError(null);
+      const deleted = await invoke<boolean>("remove_preview", { set_id: setId });
+      if (deleted) {
+        setTrack((prev) => (prev && prev.setId === setId ? null : prev));
+        openDetail(setId);
+        runSearch();
+        refreshStats();
+        setError("Note: Audio preview has been removed.");
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
 
   const openInLive = async (id: number, reveal = false) => {
     try {
@@ -304,6 +347,156 @@ export default function App() {
       await invoke("open_set", { set_id: id, reveal });
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const renderRowActions = (hit: SearchHit) => {
+    const job = queue.find((j) => j.set_id === hit.set_id);
+
+    if (hit.has_preview) {
+      return (
+        <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
+          <button
+            className="play-btn"
+            title="Play preview"
+            onClick={(e) => {
+              e.stopPropagation();
+              playPreview(hit);
+            }}
+          >
+            ▶ Play
+          </button>
+          <button
+            className="play-btn"
+            style={{ borderColor: "var(--border)", color: "var(--dim)", fontSize: "11px", padding: "3px 6px" }}
+            onClick={(e) => {
+              e.stopPropagation();
+              addToQueue(hit.set_id);
+            }}
+            title="Re-render/update audio preview"
+          >
+            Update ↻
+          </button>
+          <button
+            className="open-btn"
+            title="Open in Ableton Live"
+            onClick={(e) => {
+              e.stopPropagation();
+              openInLive(hit.set_id);
+            }}
+          >
+            Open
+          </button>
+        </div>
+      );
+    } else {
+      if (job) {
+        if (job.status === "processing") {
+          return (
+            <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
+              <button
+                className="play-btn"
+                style={{ borderColor: "var(--accent)", color: "var(--accent)" }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeFromQueue(job.id);
+                }}
+                title="Rendering in background. Click to cancel."
+              >
+                ⚙️ Rendering ×
+              </button>
+              <button
+                className="open-btn"
+                title="Open in Ableton Live"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openInLive(hit.set_id);
+                }}
+              >
+                Open
+              </button>
+            </div>
+          );
+        } else if (job.status === "pending") {
+          return (
+            <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
+              <button
+                className="play-btn"
+                style={{ borderColor: "var(--dim)", color: "var(--dim)" }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeFromQueue(job.id);
+                }}
+                title="Queued (Pending). Click to remove."
+              >
+                ⏳ Queued ×
+              </button>
+              <button
+                className="open-btn"
+                title="Open in Ableton Live"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openInLive(hit.set_id);
+                }}
+              >
+                Open
+              </button>
+            </div>
+          );
+        } else {
+          return (
+            <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
+              <button
+                className="play-btn"
+                style={{ borderColor: "#ff8f8f", color: "#ff8f8f" }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  addToQueue(hit.set_id);
+                }}
+                title={`Failed: ${job.error}. Click to retry.`}
+              >
+                ❌ Retry ↻
+              </button>
+              <button
+                className="open-btn"
+                title="Open in Ableton Live"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openInLive(hit.set_id);
+                }}
+              >
+                Open
+              </button>
+            </div>
+          );
+        }
+      } else {
+        return (
+          <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
+            <button
+              className="play-btn"
+              style={{ borderColor: "var(--border)", color: "var(--accent)" }}
+              onClick={(e) => {
+                e.stopPropagation();
+                addToQueue(hit.set_id);
+              }}
+              title="Queue audio preview render"
+            >
+              Queue Render
+            </button>
+            <button
+              className="open-btn"
+              title="Open in Ableton Live"
+              onClick={(e) => {
+                e.stopPropagation();
+                openInLive(hit.set_id);
+              }}
+            >
+              Open
+            </button>
+          </div>
+        );
+      }
     }
   };
 
@@ -325,6 +518,8 @@ export default function App() {
       });
     } catch (e) {
       setError(String(e));
+      runSearch();
+      refreshStats();
     }
   };
 
@@ -397,6 +592,40 @@ export default function App() {
           value={plugin}
           onChange={(e) => setPlugin(e.target.value)}
         />
+        <select
+          className="sort-select"
+          value={sortBy}
+          onChange={(e) => setSortBy(e.target.value)}
+        >
+          <option value="modified">Recently Edited</option>
+          <option value="name">Alphabetical (A-Z)</option>
+          <option value="bpm">Tempo (BPM)</option>
+          <option value="previews">With Previews First</option>
+        </select>
+        <select
+          className="sort-select"
+          value={dateModified}
+          onChange={(e) => setDateModified(e.target.value)}
+          style={{ width: "135px" }}
+        >
+          <option value="">Any Time Created</option>
+          <option value="today">Created Today</option>
+          <option value="yesterday">Created Yesterday</option>
+          <option value="week">Created This Week</option>
+          <option value="month">Created This Month</option>
+        </select>
+        <select
+          className="sort-select"
+          value={dateScanned}
+          onChange={(e) => setDateScanned(e.target.value)}
+          style={{ width: "135px" }}
+        >
+          <option value="">Any Time Scanned</option>
+          <option value="today">Scanned Today</option>
+          <option value="yesterday">Scanned Yesterday</option>
+          <option value="week">Scanned This Week</option>
+          <option value="month">Scanned This Month</option>
+        </select>
       </div>
 
       {error && <div className="error">{error}</div>}
@@ -426,28 +655,7 @@ export default function App() {
                   <td className="num">{h.time_signature ?? "?"}</td>
                   <td className="ver">{h.live_version?.replace("Ableton Live ", "") ?? ""}</td>
                   <td className="act">
-                    {h.has_preview && (
-                      <button
-                        className="play-btn"
-                        title="Play preview"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          playPreview(h);
-                        }}
-                      >
-                        ▶
-                      </button>
-                    )}
-                    <button
-                      className="open-btn"
-                      title="Open in Ableton Live"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openInLive(h.set_id);
-                      }}
-                    >
-                      Open
-                    </button>
+                    {renderRowActions(h)}
                   </td>
                 </tr>
               ))}
@@ -512,11 +720,19 @@ export default function App() {
                   );
                 }
               })()}
+              {detail.has_preview && (
+                <button className="open-btn danger-btn" onClick={() => removePreview(detail.set_id)}>
+                  Remove Preview
+                </button>
+              )}
             </div>
             <p className="meta">
               {detail.project} · {detail.tempo ?? "?"} bpm · {detail.time_signature ?? "?"} ·{" "}
               {detail.live_version ?? "unknown version"}
             </p>
+            {detail.preview_missing && (
+              <p className="warn">⚠ The preview file was missing from disk and has been removed from the database.</p>
+            )}
             {detail.warnings && detail.warnings.length > 0 && (
               <p className="warn">⚠ {detail.warnings.join("; ")}</p>
             )}
@@ -719,12 +935,20 @@ export default function App() {
                           </span>
                         </td>
                         <td className="job-actions">
+                          {(job.status === "failed" || job.status === "processing") && (
+                            <button
+                              className="remove-job-btn"
+                              onClick={() => addToQueue(job.set_id)}
+                              title="Retry render"
+                              style={{ marginRight: "6px", color: "var(--accent)" }}
+                            >
+                              ↻
+                            </button>
+                          )}
                           <button
                             className="remove-job-btn"
                             onClick={() => removeFromQueue(job.id)}
                             title="Remove from queue"
-                            disabled={job.status === "processing"}
-                            style={{ opacity: job.status === "processing" ? 0.3 : 1 }}
                           >
                             ×
                           </button>
@@ -737,6 +961,14 @@ export default function App() {
             </div>
 
             <div className="modal-footer">
+              <button
+                className="open-btn ghost"
+                style={{ marginRight: "10px" }}
+                onClick={retryFailed}
+                disabled={!queue.some(j => j.status === 'failed')}
+              >
+                Retry Failed ↻
+              </button>
               <button
                 className="open-btn ghost"
                 style={{ marginRight: "auto" }}

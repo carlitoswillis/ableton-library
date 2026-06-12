@@ -426,11 +426,75 @@ pub fn primary_preview(
     })
 }
 
+/// Remove the primary preview for a set, deleting its file from disk.
+/// Returns the path of the deleted file if successful.
+pub fn remove_preview(conn: &Connection, set_id: i64) -> Result<Option<String>> {
+    let preview = conn.query_row(
+        "SELECT audio_path FROM previews WHERE set_id = ?1 AND is_primary = 1",
+        params![set_id],
+        |r| r.get::<_, String>(0),
+    ).map(Some).or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        e => Err(e),
+    })?;
+
+    if let Some(audio_path) = preview {
+        let path = std::path::Path::new(&audio_path);
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        conn.execute("DELETE FROM previews WHERE set_id = ?1 AND audio_path = ?2", params![set_id, audio_path])?;
+        recompute_primary(conn, set_id)?;
+        Ok(Some(audio_path))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Delete preview rows whose audio files no longer exist on disk.
+/// Returns a list of deleted preview audio paths.
+pub fn prune_stale_previews(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare("SELECT id, set_id, audio_path FROM previews")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, String>(2)?))
+    })?;
+
+    let mut stale = Vec::new();
+    let mut to_delete = Vec::new();
+    for row in rows {
+        let (id, set_id, audio_path) = row?;
+        if !std::path::Path::new(&audio_path).exists() {
+            to_delete.push(id);
+            stale.push((set_id.unwrap_or(0), audio_path));
+        }
+    }
+
+    for id in to_delete {
+        conn.execute("DELETE FROM previews WHERE id = ?1", params![id])?;
+    }
+
+    let mut affected_sets = std::collections::HashSet::new();
+    for &(set_id, _) in &stale {
+        if set_id > 0 {
+            affected_sets.insert(set_id);
+        }
+    }
+    for set_id in affected_sets {
+        recompute_primary(conn, set_id)?;
+    }
+
+    Ok(stale)
+}
+
+
 pub struct SearchOpts {
     pub text: Option<String>,
     pub min_bpm: Option<f64>,
     pub max_bpm: Option<f64>,
     pub plugin: Option<String>,
+    pub sort_by: Option<String>,
+    pub date_modified: Option<String>,
+    pub date_scanned: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -446,41 +510,78 @@ pub struct SearchHit {
 }
 
 pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
-    // With text: rank by weighted bm25 so name matches beat content matches.
-    // Column weights:        set_id, project, set, tracks, devices, samples
-    // (set/project names matter most; a plugin or sample hit still surfaces,
-    // just far below sets that match by name.)
-    let sql = if o.text.is_some() {
-        "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version,
-                pv.audio_path, pv.duration
-         FROM search f
-         JOIN sets s ON s.id = f.set_id
-         JOIN projects p ON p.id = s.project_id
-         LEFT JOIN previews pv ON pv.set_id = s.id AND pv.is_primary = 1
-         WHERE f.search MATCH ?1
-           AND (?2 IS NULL OR s.tempo >= ?2)
-           AND (?3 IS NULL OR s.tempo <= ?3)
-           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM devices d
-                                      WHERE d.set_id = s.id
-                                        AND d.name LIKE '%' || ?4 || '%'))
-         ORDER BY bm25(f.search, 0.0, 8.0, 10.0, 4.0, 1.0, 0.5), p.name, s.als_path"
-    } else {
-        "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version,
-                pv.audio_path, pv.duration
-         FROM sets s
-         JOIN projects p ON p.id = s.project_id
-         LEFT JOIN previews pv ON pv.set_id = s.id AND pv.is_primary = 1
-         WHERE ?1 IS NULL
-           AND (?2 IS NULL OR s.tempo >= ?2)
-           AND (?3 IS NULL OR s.tempo <= ?3)
-           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM devices d
-                                      WHERE d.set_id = s.id
-                                        AND d.name LIKE '%' || ?4 || '%'))
-         ORDER BY p.name, s.als_path"
+    let order_by = match o.sort_by.as_deref() {
+        Some("modified") => "s.mtime DESC, p.name, s.als_path",
+        Some("bpm") => "s.tempo DESC, p.name, s.als_path",
+        Some("previews") => "pv.audio_path IS NULL, p.name, s.als_path",
+        _ => {
+            if o.text.is_some() {
+                "bm25(f.search, 0.0, 8.0, 10.0, 4.0, 1.0, 0.5), p.name, s.als_path"
+            } else {
+                "p.name, s.als_path"
+            }
+        }
     };
-    let mut stmt = conn.prepare(sql)?;
+
+    let modified_bound = match o.date_modified.as_deref() {
+        Some("today") => Some(chrono::Utc::now() - chrono::Duration::days(1)),
+        Some("yesterday") => Some(chrono::Utc::now() - chrono::Duration::days(2)),
+        Some("week") => Some(chrono::Utc::now() - chrono::Duration::days(7)),
+        Some("month") => Some(chrono::Utc::now() - chrono::Duration::days(30)),
+        _ => None,
+    };
+    let modified_bound_str = modified_bound.map(|dt| dt.format("%Y-%m-%dT%H:%M:%S+00:00").to_string());
+
+    let scanned_bound = match o.date_scanned.as_deref() {
+        Some("today") => Some(chrono::Utc::now() - chrono::Duration::days(1)),
+        Some("yesterday") => Some(chrono::Utc::now() - chrono::Duration::days(2)),
+        Some("week") => Some(chrono::Utc::now() - chrono::Duration::days(7)),
+        Some("month") => Some(chrono::Utc::now() - chrono::Duration::days(30)),
+        _ => None,
+    };
+    let scanned_bound_str = scanned_bound.map(|dt| dt.format("%Y-%m-%dT%H:%M:%S+00:00").to_string());
+
+    let sql = if o.text.is_some() {
+        format!(
+            "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version,
+                    pv.audio_path, pv.duration
+             FROM search f
+             JOIN sets s ON s.id = f.set_id
+             JOIN projects p ON p.id = s.project_id
+             LEFT JOIN previews pv ON pv.set_id = s.id AND pv.is_primary = 1
+             WHERE f.search MATCH ?1
+               AND (?2 IS NULL OR s.tempo >= ?2)
+               AND (?3 IS NULL OR s.tempo <= ?3)
+               AND (?4 IS NULL OR EXISTS (SELECT 1 FROM devices d
+                                          WHERE d.set_id = s.id
+                                            AND d.name LIKE '%' || ?4 || '%'))
+               AND (?5 IS NULL OR s.mtime >= ?5)
+               AND (?6 IS NULL OR p.last_scanned >= ?6)
+             ORDER BY {}",
+            order_by
+        )
+    } else {
+        format!(
+            "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version,
+                    pv.audio_path, pv.duration
+             FROM sets s
+             JOIN projects p ON p.id = s.project_id
+             LEFT JOIN previews pv ON pv.set_id = s.id AND pv.is_primary = 1
+             WHERE ?1 IS NULL
+               AND (?2 IS NULL OR s.tempo >= ?2)
+               AND (?3 IS NULL OR s.tempo <= ?3)
+               AND (?4 IS NULL OR EXISTS (SELECT 1 FROM devices d
+                                          WHERE d.set_id = s.id
+                                            AND d.name LIKE '%' || ?4 || '%'))
+               AND (?5 IS NULL OR s.mtime >= ?5)
+               AND (?6 IS NULL OR p.last_scanned >= ?6)
+             ORDER BY {}",
+            order_by
+        )
+    };
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        params![o.text, o.min_bpm, o.max_bpm, o.plugin],
+        params![o.text, o.min_bpm, o.max_bpm, o.plugin, modified_bound_str, scanned_bound_str],
         |r| {
             let preview_path: Option<String> = r.get(6)?;
             Ok(SearchHit {
@@ -599,6 +700,40 @@ pub fn set_detail(conn: &Connection, set_id: i64) -> Result<serde_json::Value> {
         },
     )
     .with_context(|| format!("no set with id {set_id}"))?;
+
+    // Query preview details
+    let preview: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, audio_path FROM previews WHERE set_id = ?1 AND is_primary = 1",
+            params![set_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?;
+
+    let mut preview_missing = false;
+    let mut has_preview = false;
+    let mut preview_path = None;
+
+    if let Some((id, path)) = preview {
+        if std::path::Path::new(&path).exists() {
+            has_preview = true;
+            preview_path = Some(path);
+        } else {
+            // Preview is missing from disk! Delete it from the database and note it.
+            conn.execute("DELETE FROM previews WHERE id = ?1", params![id])?;
+            recompute_primary(conn, set_id)?;
+            preview_missing = true;
+        }
+    }
+
+    out.insert("has_preview".into(), has_preview.into());
+    out.insert("preview_path".into(), preview_path.into());
+    out.insert("preview_missing".into(), preview_missing.into());
+
 
     let list = |sql: &str, cols: &[&str]| -> Result<serde_json::Value> {
         let mut stmt = conn.prepare(sql)?;
@@ -773,7 +908,78 @@ pub fn clear_completed_export_jobs(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub fn retry_failed_export_jobs(conn: &Connection) -> Result<()> {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
+    conn.execute(
+        "UPDATE export_jobs SET status = 'pending', error = NULL, started_at = NULL, completed_at = NULL, created_at = ?1 WHERE status = 'failed'",
+        params![now],
+    )?;
+    Ok(())
+}
+
 pub fn remove_export_job(conn: &Connection, job_id: i64) -> Result<()> {
     conn.execute("DELETE FROM export_jobs WHERE id = ?1", params![job_id])?;
     Ok(())
 }
+
+pub fn reset_stale_export_jobs(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE export_jobs SET status = 'failed', error = 'App closed or crashed during rendering' WHERE status = 'processing'",
+        [],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_remove_and_prune_previews() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(SCHEMA_V2)?;
+        conn.execute_batch(SCHEMA_V3)?;
+
+        // Insert project
+        let project_id = upsert_project(&conn, "/path/to/project", "My Project", "2026-06-11T12:00:00+00:00")?;
+
+        // Insert set
+        conn.execute(
+            "INSERT INTO sets (id, project_id, als_path, file_size, mtime, content_hash, warnings)
+             VALUES (1, ?1, '/path/to/project/set.als', 100, '2026-06-11T12:00:00+00:00', 'hash', '[]')",
+            params![project_id],
+        )?;
+
+        // Insert preview (which doesn't exist on disk)
+        let row = PreviewRow {
+            set_id: Some(1),
+            project_id: Some(project_id),
+            audio_path: "/path/to/nonexistent/preview.wav".into(),
+            source: "manual".into(),
+            confidence: 1.0,
+            mtime: "2026-06-11T12:00:00+00:00".into(),
+            size: 1000,
+            duration: Some(10.0),
+            peaks_json: Some("[]".into()),
+        };
+        upsert_preview(&conn, &row)?;
+
+        // Query primary preview -> should exist in db
+        let p = primary_preview(&conn, 1)?;
+        assert!(p.is_some());
+        assert_eq!(p.unwrap().0, "/path/to/nonexistent/preview.wav");
+
+        // Now prune stale previews (file doesn't exist on disk)
+        let pruned = prune_stale_previews(&conn)?;
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].1, "/path/to/nonexistent/preview.wav");
+
+        // Primary preview should now be None
+        let p = primary_preview(&conn, 1)?;
+        assert!(p.is_none());
+
+        Ok(())
+    }
+}
+
