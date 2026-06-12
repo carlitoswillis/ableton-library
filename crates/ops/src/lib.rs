@@ -144,7 +144,7 @@ fn harvest_folder_renders(
         .collect();
 
     let mut count = 0usize;
-    for r in previews::discover_renders(&[dir.to_path_buf()])? {
+    for r in previews::discover_renders(&[dir.to_path_buf()], Some(2))? {
         let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
         if known_samples.contains(&abs) {
             continue;
@@ -200,7 +200,7 @@ pub fn hunt_renders(
         anyhow::bail!("catalog is empty — scan a projects folder first");
     }
     let known_samples = indexer::all_sample_paths(conn)?;
-    let renders = previews::discover_renders(roots)?;
+    let renders = previews::discover_renders(roots, None)?;
     log(format!(
         "{} candidate audio file(s), matching against {} set(s)",
         renders.len(),

@@ -37,33 +37,19 @@ fn is_audio(path: &Path) -> bool {
         .map_or(false, |e| AUDIO_EXTS.contains(&e.as_str()))
 }
 
-fn is_project_dir(path: &Path) -> bool {
-    if let Ok(entries) = std::fs::read_dir(path) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            if entry.path().extension().map_or(false, |ext| ext == "als") {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Hunt one or more roots for candidate render files.
-pub fn discover_renders(roots: &[PathBuf]) -> std::io::Result<Vec<RenderFile>> {
+pub fn discover_renders(roots: &[PathBuf], max_depth: Option<usize>) -> std::io::Result<Vec<RenderFile>> {
     let mut out = Vec::new();
     for root in roots {
-        for entry in WalkDir::new(root)
+        let mut walk = WalkDir::new(root);
+        if let Some(depth) = max_depth {
+            walk = walk.max_depth(depth);
+        }
+        for entry in walk
             .into_iter()
             .filter_entry(|e| {
                 let name = e.file_name().to_string_lossy();
-                if name.starts_with('.') || EXCLUDED_DIRS.contains(&name.as_ref()) {
-                    return false;
-                }
-                let p = e.path();
-                if e.file_type().is_dir() && p != root && is_project_dir(&p) {
-                    return false;
-                }
-                true
+                !name.starts_with('.') && !EXCLUDED_DIRS.contains(&name.as_ref())
             })
             .filter_map(|e| e.ok())
         {
