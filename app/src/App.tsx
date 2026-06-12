@@ -146,6 +146,14 @@ export default function App() {
     }
   }, [scanLogs]);
 
+  const cancelScan = async () => {
+    try {
+      await invoke("cancel_scan");
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const pickAndScan = async () => {
     try {
       const dir = await openDialog({
@@ -174,7 +182,12 @@ export default function App() {
       refreshStats();
       runSearch();
     } catch (e) {
-      setError(String(e));
+      const msg = String(e);
+      if (msg.includes("cancelled")) {
+        setScanMsg("Scan cancelled");
+      } else {
+        setError(msg);
+      }
       setShowProgressModal(false);
     } finally {
       setScanning(false);
@@ -234,6 +247,27 @@ export default function App() {
           {scanning ? "Scanning…" : "Scan folder…"}
         </button>
       </header>
+
+      {scanning && !showProgressModal && (
+        <div className="scan-banner">
+          <div className="scan-banner-status">
+            <span className="pulse-dot" />
+            <strong>Scanning in background...</strong>
+          </div>
+          <span className="scan-banner-stats">
+            {liveStats.indexed} indexed · {liveStats.previews} preview(s) harvested
+            {liveStats.errors > 0 ? ` · ${liveStats.errors} error(s)` : ""}
+          </span>
+          <div className="scan-banner-actions">
+            <button className="banner-btn" onClick={() => setShowProgressModal(true)}>
+              View Logs
+            </button>
+            <button className="banner-btn danger" onClick={cancelScan}>
+              Cancel Scan
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="filters">
         <input
@@ -389,20 +423,19 @@ export default function App() {
       </div>
 
       {showProgressModal && (
-        <div className="modal-overlay" onClick={() => !scanning && setShowProgressModal(false)}>
+        <div className="modal-overlay" onClick={() => setShowProgressModal(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2 className="modal-title">
                 {scanning ? "Scanning Library..." : "Scan Complete"}
               </h2>
-              {!scanning && (
-                <button
-                  className="modal-close-btn"
-                  onClick={() => setShowProgressModal(false)}
-                >
-                  ×
-                </button>
-              )}
+              <button
+                className="modal-close-btn"
+                onClick={() => setShowProgressModal(false)}
+                title={scanning ? "Run in background" : "Close"}
+              >
+                ×
+              </button>
             </div>
 
             <div className="scan-stats-row">
@@ -442,6 +475,15 @@ export default function App() {
             </div>
 
             <div className="modal-footer">
+              {scanning && (
+                <button
+                  className="open-btn ghost"
+                  style={{ marginRight: "auto" }}
+                  onClick={cancelScan}
+                >
+                  Cancel Scan
+                </button>
+              )}
               <button
                 className="open-btn"
                 disabled={scanning}

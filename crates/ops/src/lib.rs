@@ -32,6 +32,7 @@ pub fn scan_library(
     root: &Path,
     force: bool,
     harvest: bool,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
     log: Log,
 ) -> Result<ScanSummary> {
     let root_abs = std::path::absolute(root)?;
@@ -43,11 +44,21 @@ pub fn scan_library(
 
     conn.execute_batch("BEGIN")?;
     for proj in discover(&root_abs)? {
+        if let Some(c) = cancel {
+            if c.load(std::sync::atomic::Ordering::Relaxed) {
+                anyhow::bail!("scan cancelled by user");
+            }
+        }
         let folder = std::path::absolute(&proj.dir)?.to_string_lossy().into_owned();
         let pid = indexer::upsert_project(conn, &folder, &proj.name, &now)?;
         harvest_targets.push((proj.dir.clone(), proj.name.clone(), pid));
         indexer::replace_backups(conn, pid, &proj.backups)?;
         for als in &proj.als_files {
+            if let Some(c) = cancel {
+                if c.load(std::sync::atomic::Ordering::Relaxed) {
+                    anyhow::bail!("scan cancelled by user");
+                }
+            }
             let als_abs = std::path::absolute(als)?.to_string_lossy().into_owned();
             seen.insert(als_abs.clone());
             let size = std::fs::metadata(als)?.len();
@@ -78,6 +89,11 @@ pub fn scan_library(
     if harvest {
         let known_samples = indexer::all_sample_paths(conn)?;
         for (dir, name, pid) in &harvest_targets {
+            if let Some(c) = cancel {
+                if c.load(std::sync::atomic::Ordering::Relaxed) {
+                    anyhow::bail!("scan cancelled by user");
+                }
+            }
             match harvest_folder_renders(conn, dir, name, *pid, &known_samples, log) {
                 Ok(n) => s.harvested += n,
                 Err(e) => log(format!("preview harvest failed for {}: {e}", dir.display())),

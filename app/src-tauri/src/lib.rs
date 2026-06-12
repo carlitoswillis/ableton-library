@@ -75,21 +75,49 @@ async fn preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
 
 use tauri::Emitter;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tauri::State;
+
+#[derive(Default)]
+struct ScanState {
+    cancel: Arc<AtomicBool>,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn cancel_scan(state: State<'_, ScanState>) -> Result<(), String> {
+    state.cancel.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
 /// Index a folder of Ableton projects (incremental; harvests in-folder
 /// renders as previews). Same engine as `ableton-scan scan`.
 ///
 /// MUST be async + spawn_blocking: synchronous Tauri commands run on the
 /// MAIN thread and freeze the whole window (the beach ball incident).
 #[tauri::command(rename_all = "snake_case")]
-async fn scan_folder(app: tauri::AppHandle, root: String) -> Result<ops::ScanSummary, String> {
+async fn scan_folder(
+    app: tauri::AppHandle,
+    state: State<'_, ScanState>,
+    root: String,
+) -> Result<ops::ScanSummary, String> {
+    state.cancel.store(false, Ordering::Relaxed);
+    let cancel_flag = state.cancel.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
         let app_clone = app.clone();
         let mut log = move |line: String| {
             let _ = app_clone.emit("scan-progress", line);
         };
-        ops::scan_library(&conn, std::path::Path::new(&root), false, true, &mut log)
-            .map_err(|e| e.to_string())
+        ops::scan_library(
+            &conn,
+            std::path::Path::new(&root),
+            false,
+            true,
+            Some(&cancel_flag),
+            &mut log,
+        )
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -122,9 +150,10 @@ async fn open_set(set_id: i64, reveal: bool) -> Result<(), String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(ScanState::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            search, inspect, stats, open_set, preview, scan_folder
+            search, inspect, stats, open_set, preview, scan_folder, cancel_scan
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

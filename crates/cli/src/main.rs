@@ -219,7 +219,7 @@ fn cmd_scan(root: &Path, db: Option<PathBuf>, force: bool, no_previews: bool) ->
     let db = db_path(db)?;
     let conn = indexer::open(&db)?;
     let mut log = |line: String| eprintln!("  {line}");
-    let s = ops::scan_library(&conn, root, force, !no_previews, &mut log)?;
+    let s = ops::scan_library(&conn, root, force, !no_previews, None, &mut log)?;
     let st = indexer::stats(&conn)?;
     eprintln!(
         "scan done: {} indexed, {} unchanged, {} errors, {} pruned, {} preview(s) harvested",
