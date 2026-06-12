@@ -210,9 +210,11 @@ export default function App() {
   const handleRowCheck = (setId: number, shift: boolean) => {
     const next = new Set(selected);
     let ranged = false;
-    if (shift && selectAnchor.current !== null && selectAnchor.current !== setId) {
+    if (shift) {
       const ids = hits.map((h) => h.set_id);
-      const a = ids.indexOf(selectAnchor.current);
+      // No anchor yet (nothing clicked before): shift-click ranges from the
+      // top of the list, Finder-style.
+      const a = selectAnchor.current !== null ? ids.indexOf(selectAnchor.current) : 0;
       const b = ids.indexOf(setId);
       if (a !== -1 && b !== -1) {
         // Whether the range selects or deselects follows the clicked row.
