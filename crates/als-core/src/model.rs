@@ -19,6 +19,7 @@ pub struct SetSnapshot {
     /// e.g. "11.0_11300" (root `MinorVersion` attribute).
     pub schema_version: Option<String>,
     pub tempo: Option<f64>,
+    pub tempos: Vec<f64>,
     /// e.g. "4/4"
     pub time_signature: Option<String>,
     pub tracks: Vec<Track>,

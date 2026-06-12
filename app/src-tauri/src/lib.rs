@@ -347,6 +347,70 @@ async fn scan_folder(
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command(rename_all = "snake_case")]
+async fn bulk_preview_scan(
+    app: tauri::AppHandle,
+    state: State<'_, ScanState>,
+) -> Result<ops::ScanSummary, String> {
+    state.cancel.store(false, Ordering::Relaxed);
+    let cancel_flag = state.cancel.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+        let app_clone = app.clone();
+        let mut log = move |line: String| {
+            let _ = app_clone.emit("scan-progress", line);
+        };
+        
+        let mut s = ops::ScanSummary::default();
+
+        // 1. Harvest project folders of sets without previews
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT p.id, p.name, p.folder_path 
+             FROM projects p 
+             JOIN sets s ON s.project_id = p.id 
+             LEFT JOIN previews pr ON pr.set_id = s.id 
+             WHERE pr.audio_path IS NULL"
+        ).map_err(|e| e.to_string())?;
+        
+        let projects: Vec<(i64, String, String)> = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        }).map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+        
+        let known_samples = indexer::all_sample_paths(&conn).map_err(|e| e.to_string())?;
+        
+        for (pid, name, dir) in projects {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err("scan cancelled by user".to_string());
+            }
+            let path = std::path::PathBuf::from(dir);
+            match ops::harvest_folder_renders(&conn, &path, &name, pid, &known_samples, Some(&cancel_flag), &mut log) {
+                Ok(n) => s.harvested += n,
+                Err(e) => log(format!("preview harvest failed for {}: {}", path.display(), e)),
+            }
+        }
+        
+        // 2. Hunt watch folders
+        let watch_folders = indexer::list_watch_folders(&conn).map_err(|e| e.to_string())?;
+        if !watch_folders.is_empty() {
+            let roots: Vec<std::path::PathBuf> = watch_folders.into_iter().map(|(_, p)| std::path::PathBuf::from(p)).collect();
+            match ops::hunt_renders(&conn, &roots, 0.6, false, &mut log) {
+                Ok(hs) => {
+                    s.harvested += hs.matched;
+                    s.errors += hs.errors;
+                    s.unchanged += hs.unchanged;
+                }
+                Err(e) => log(format!("watch folder hunt failed: {}", e)),
+            }
+        }
+        
+        Ok(s)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Open the set in Ableton Live (default .als handler), or reveal it in Finder.
 /// Only ever opens paths stored in the catalog — never arbitrary input.
 #[tauri::command(rename_all = "snake_case")]
@@ -455,6 +519,55 @@ async fn link_watch_suggestion(set_id: i64, audio_path: String) -> Result<(), St
     ops::attach(&conn, set_id, &target_path).map_err(|e| e.to_string())
 }
 
+#[tauri::command(rename_all = "snake_case")]
+async fn link_watch_suggestions(matches: Vec<(i64, String)>) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    for (set_id, audio_path) in matches {
+        let als_path = match indexer::set_path(&conn, set_id) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let als_path = std::path::Path::new(&als_path);
+        
+        let set_stem = match als_path.file_stem() {
+            Some(x) => x.to_string_lossy().into_owned(),
+            None => continue,
+        };
+            
+        let project_dir = match als_path.parent() {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let src_path = std::path::Path::new(&audio_path);
+        if !src_path.exists() {
+            continue;
+        }
+        
+        let ext = src_path
+            .extension()
+            .map(|x| x.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "wav".to_string());
+            
+        let target_path = project_dir.join(format!("{}.{}", set_stem, ext));
+
+        if let Some(parent) = target_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        
+        if std::fs::rename(src_path, &target_path).is_err() {
+            if std::fs::copy(src_path, &target_path).is_ok() {
+                let _ = std::fs::remove_file(src_path);
+            } else {
+                continue;
+            }
+        }
+
+        let _ = ops::attach(&conn, set_id, &target_path);
+    }
+    Ok(())
+}
+
 
 pub fn run() {
     tauri::Builder::default()
@@ -475,12 +588,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            search, inspect, stats, open_set, preview, scan_folder, cancel_scan,
+            search, inspect, stats, open_set, preview, scan_folder, cancel_scan, bulk_preview_scan,
             add_to_export_queue, get_export_queue, remove_from_export_queue,
             clear_completed_jobs, toggle_export_queue, get_export_queue_active,
             retry_failed_jobs, remove_preview,
             add_watch_folder, remove_watch_folder, list_watch_folders,
-            get_watch_suggestions, ignore_watch_suggestion, link_watch_suggestion
+            get_watch_suggestions, ignore_watch_suggestion, link_watch_suggestion,
+            link_watch_suggestions
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

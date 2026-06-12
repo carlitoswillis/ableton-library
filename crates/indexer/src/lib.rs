@@ -129,9 +129,14 @@ CREATE TABLE IF NOT EXISTS ignored_matches (
 );
 "#;
 
+/// v5: tempos json list
+const SCHEMA_V5: &str = r#"
+ALTER TABLE sets ADD COLUMN tempos_json TEXT NOT NULL DEFAULT '[]';
+"#;
+
 /// Current schema version. Migrations upgrade older catalogs in place;
 /// catalogs NEWER than this build are refused.
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 /// Open (creating if needed) the index database, migrating if needed.
 pub fn open(db_path: &Path) -> Result<Connection> {
@@ -157,6 +162,9 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         conn.execute_batch(SCHEMA_V2)?;
         conn.execute_batch(SCHEMA_V3)?;
         conn.execute_batch(SCHEMA_V4)?;
+        // v5 requires ALTER TABLE, but if we just created the table with v0 SCHEMA, it doesn't have tempos_json unless we add it to the original SCHEMA or run V5.
+        // It's cleaner to just run V5 here.
+        conn.execute_batch(SCHEMA_V5)?;
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         return Ok(conn);
     }
@@ -172,6 +180,10 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     if version == 3 {
         conn.execute_batch(SCHEMA_V4)?;
         version = 4;
+    }
+    if version == 4 {
+        conn.execute_batch(SCHEMA_V5)?;
+        version = 5;
         conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
     }
     debug_assert_eq!(version, SCHEMA_VERSION);
@@ -179,6 +191,7 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     conn.execute_batch(SCHEMA_V2)?;
     conn.execute_batch(SCHEMA_V3)?;
     conn.execute_batch(SCHEMA_V4)?;
+    // v5 is ALTER TABLE, not idempotent (IF NOT EXISTS), so we don't re-run it blindly if version was already 5.
     Ok(conn)
 }
 
@@ -253,8 +266,8 @@ pub fn ingest_set(conn: &Connection, project_id: i64, s: &SetSnapshot) -> Result
 
     conn.execute(
         "INSERT INTO sets (project_id, als_path, file_size, mtime, content_hash,
-                           live_version, schema_version, tempo, time_signature, warnings)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                           live_version, schema_version, tempo, tempos_json, time_signature, warnings)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             project_id,
             s.als_path,
@@ -264,6 +277,7 @@ pub fn ingest_set(conn: &Connection, project_id: i64, s: &SetSnapshot) -> Result
             s.live_version,
             s.schema_version,
             s.tempo,
+            serde_json::to_string(&s.tempos)?,
             s.time_signature,
             serde_json::to_string(&s.warnings)?,
         ],
@@ -445,6 +459,20 @@ pub fn primary_preview(
     })
 }
 
+/// Get just the confidence and mtime of the primary preview (fast check).
+pub fn primary_preview_stats(conn: &Connection, set_id: i64) -> Result<Option<(f64, String)>> {
+    conn.query_row(
+        "SELECT confidence, mtime FROM previews WHERE set_id = ?1 AND is_primary = 1",
+        params![set_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        e => Err(e.into()),
+    })
+}
+
 /// Remove the primary preview for a set, deleting its file from disk.
 /// Returns the path of the deleted file if successful.
 pub fn remove_preview(conn: &Connection, set_id: i64) -> Result<Option<String>> {
@@ -523,6 +551,7 @@ pub struct SearchHit {
     pub project: String,
     pub als_path: String,
     pub tempo: Option<f64>,
+    pub tempos: Vec<f64>,
     pub time_signature: Option<String>,
     pub live_version: Option<String>,
     pub has_preview: bool,
@@ -563,7 +592,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
 
     let sql = if o.text.is_some() {
         format!(
-            "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version,
+            "SELECT s.id, p.name, s.als_path, s.tempo, s.tempos_json, s.time_signature, s.live_version,
                     pv.audio_path, pv.duration
              FROM search f
              JOIN sets s ON s.id = f.set_id
@@ -583,7 +612,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
         )
     } else {
         format!(
-            "SELECT s.id, p.name, s.als_path, s.tempo, s.time_signature, s.live_version,
+            "SELECT s.id, p.name, s.als_path, s.tempo, s.tempos_json, s.time_signature, s.live_version,
                     pv.audio_path, pv.duration
              FROM sets s
              JOIN projects p ON p.id = s.project_id
@@ -613,16 +642,19 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
             o.has_preview,
         ],
         |r| {
-            let preview_path: Option<String> = r.get(6)?;
+            let preview_path: Option<String> = r.get(7)?;
+            let tempos_json: String = r.get(4)?;
+            let tempos: Vec<f64> = serde_json::from_str(&tempos_json).unwrap_or_default();
             Ok(SearchHit {
                 set_id: r.get(0)?,
                 project: r.get(1)?,
                 als_path: r.get(2)?,
                 tempo: r.get(3)?,
-                time_signature: r.get(4)?,
-                live_version: r.get(5)?,
+                tempos,
+                time_signature: r.get(5)?,
+                live_version: r.get(6)?,
                 has_preview: preview_path.is_some(),
-                preview_duration: r.get(7)?,
+                preview_duration: r.get(8)?,
             })
         },
     )?;
@@ -711,17 +743,24 @@ pub fn set_path(conn: &Connection, set_id: i64) -> Result<String> {
 pub fn set_detail(conn: &Connection, set_id: i64) -> Result<serde_json::Value> {
     let mut out = serde_json::Map::new();
     conn.query_row(
-        "SELECT s.als_path, s.live_version, s.tempo, s.time_signature, s.warnings, p.name
+        "SELECT s.als_path, s.live_version, s.tempo, s.tempos_json, s.time_signature, s.warnings, p.name
          FROM sets s JOIN projects p ON p.id = s.project_id WHERE s.id = ?1",
         params![set_id],
         |r| {
             out.insert("set_id".into(), set_id.into());
-            out.insert("project".into(), r.get::<_, String>(5)?.into());
+            out.insert("project".into(), r.get::<_, String>(6)?.into());
             out.insert("als_path".into(), r.get::<_, String>(0)?.into());
             out.insert("live_version".into(), r.get::<_, Option<String>>(1)?.into());
             out.insert("tempo".into(), r.get::<_, Option<f64>>(2)?.into());
-            out.insert("time_signature".into(), r.get::<_, Option<String>>(3)?.into());
-            let w: String = r.get(4)?;
+            
+            let t_json: String = r.get(3)?;
+            out.insert(
+                "tempos".into(),
+                serde_json::from_str(&t_json).unwrap_or(serde_json::Value::Array(Vec::new()))
+            );
+            
+            out.insert("time_signature".into(), r.get::<_, Option<String>>(4)?.into());
+            let w: String = r.get(5)?;
             out.insert(
                 "warnings".into(),
                 serde_json::from_str(&w).unwrap_or(serde_json::Value::Null),

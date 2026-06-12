@@ -99,7 +99,7 @@ pub fn scan_library(
                     anyhow::bail!("scan cancelled by user");
                 }
             }
-            match harvest_folder_renders(conn, dir, name, *pid, &known_samples, log) {
+            match harvest_folder_renders(conn, dir, name, *pid, &known_samples, cancel, log) {
                 Ok(n) => s.harvested += n,
                 Err(e) => log(format!("preview harvest failed for {}: {e}", dir.display())),
             }
@@ -135,12 +135,13 @@ fn build_preview_row(
 /// Folder placement is strong evidence, so matching is local and generous:
 /// name match -> that set (+0.05 folder bonus); no name match but the project
 /// has exactly one set -> that set at 0.7; otherwise skipped.
-fn harvest_folder_renders(
+pub fn harvest_folder_renders(
     conn: &Connection,
     dir: &Path,
     project_name: &str,
     pid: i64,
     known_samples: &HashSet<String>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
     log: Log,
 ) -> Result<usize> {
     let sets = indexer::project_sets(conn, pid)?;
@@ -165,7 +166,22 @@ fn harvest_folder_renders(
         .collect();
 
     let mut count = 0usize;
+    
+    // First pass: Group by (set_id, project_id) and keep only the best match
+    struct Win {
+        render: previews::RenderFile,
+        confidence: f64,
+        mtime: String,
+        size: u64,
+    }
+    let mut winners: std::collections::HashMap<(Option<i64>, Option<i64>), Win> = std::collections::HashMap::new();
+
     for r in previews::discover_renders(&[dir.to_path_buf()], Some(2))? {
+        if let Some(c) = cancel {
+            if c.load(std::sync::atomic::Ordering::Relaxed) {
+                anyhow::bail!("scan cancelled by user");
+            }
+        }
         let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
         if known_samples.contains(&abs) {
             continue;
@@ -181,19 +197,63 @@ fn harvest_folder_renders(
                 None if sets.len() == 1 => (Some(sets[0].0), Some(pid), 0.7),
                 None => continue,
             };
+            
         let mtime = iso_mtime(&r.path)?;
-        if indexer::preview_is_fresh(conn, set_id, &abs, r.size, &mtime)? {
+        let key = (set_id, project_id);
+        
+        let is_better = match winners.get(&key) {
+            Some(existing) => {
+                if confidence > existing.confidence {
+                    true
+                } else if (confidence - existing.confidence).abs() < f64::EPSILON {
+                    mtime > existing.mtime
+                } else {
+                    false
+                }
+            }
+            None => true,
+        };
+        
+        if is_better {
+            winners.insert(key, Win {
+                render: r.clone(),
+                confidence,
+                mtime,
+                size: r.size,
+            });
+        }
+    }
+
+    // Second pass: process the winners
+    for (key, win) in winners {
+        let (set_id, project_id) = key;
+        let abs = std::path::absolute(&win.render.path)?.to_string_lossy().into_owned();
+        
+        if indexer::preview_is_fresh(conn, set_id, &abs, win.size, &win.mtime)? {
             continue;
         }
-        match build_preview_row(&r.path, set_id, project_id, "discovered", confidence) {
+
+        // If a primary preview already exists, ensure our new winner is strictly better
+        if let Some(sid) = set_id {
+            if let Ok(Some((db_conf, db_mtime))) = indexer::primary_preview_stats(conn, sid) {
+                if win.confidence < db_conf {
+                    continue; // DB already has a more confident match
+                } else if (win.confidence - db_conf).abs() < f64::EPSILON && win.mtime <= db_mtime {
+                    continue; // DB already has a newer or equally new match
+                }
+            }
+        }
+
+        match build_preview_row(&win.render.path, set_id, project_id, "discovered", win.confidence) {
             Ok(row) => {
                 indexer::upsert_preview(conn, &row)?;
                 count += 1;
-                log(format!("preview ({confidence:.2}) {}", r.path.display()));
+                log(format!("preview ({:.2}) {}", win.confidence, win.render.path.display()));
             }
-            Err(e) => log(format!("ERROR decoding {}: {e}", r.path.display())),
+            Err(e) => log(format!("ERROR decoding {}: {}", win.render.path.display(), e)),
         }
     }
+    
     Ok(count)
 }
 
@@ -229,6 +289,16 @@ pub fn hunt_renders(
     ));
 
     let mut s = HuntSummary::default();
+    
+    // First pass: Group by (set_id, project_id) and keep only the best match
+    struct Win {
+        render: previews::RenderFile,
+        confidence: f64,
+        mtime: String,
+        size: u64,
+    }
+    let mut winners: std::collections::HashMap<(Option<i64>, Option<i64>), Win> = std::collections::HashMap::new();
+
     for r in &renders {
         let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
         if known_samples.contains(&abs) {
@@ -240,7 +310,7 @@ pub fn hunt_renders(
         }
         match best_match(&normalize(&r.stem), &cands, threshold) {
             Some(m) => {
-                let (set_id, project_id) = match m.target {
+                let key = match m.target {
                     MatchTarget::Set { set_id, project_id } => (Some(set_id), Some(project_id)),
                     MatchTarget::Project { project_id } => {
                         s.ambiguous += 1;
@@ -248,25 +318,27 @@ pub fn hunt_renders(
                     }
                 };
                 let mtime = iso_mtime(&r.path)?;
-                if indexer::preview_is_fresh(conn, set_id, &abs, r.size, &mtime)? {
-                    s.unchanged += 1;
-                    continue;
-                }
-                match build_preview_row(&r.path, set_id, project_id, "discovered", m.confidence) {
-                    Ok(row) => {
-                        indexer::upsert_preview(conn, &row)?;
-                        s.matched += 1;
-                        log(format!(
-                            "matched ({:.2}) {} -> set {:?}",
-                            m.confidence,
-                            r.path.display(),
-                            set_id
-                        ));
+                
+                let is_better = match winners.get(&key) {
+                    Some(existing) => {
+                        if m.confidence > existing.confidence {
+                            true
+                        } else if (m.confidence - existing.confidence).abs() < f64::EPSILON {
+                            mtime > existing.mtime
+                        } else {
+                            false
+                        }
                     }
-                    Err(e) => {
-                        s.errors += 1;
-                        log(format!("ERROR decoding {}: {e}", r.path.display()));
-                    }
+                    None => true,
+                };
+                
+                if is_better {
+                    winners.insert(key, Win {
+                        render: r.clone(),
+                        confidence: m.confidence,
+                        mtime,
+                        size: r.size,
+                    });
                 }
             }
             None => {
@@ -274,6 +346,46 @@ pub fn hunt_renders(
                 if verbose {
                     log(format!("unmatched: {}", r.path.display()));
                 }
+            }
+        }
+    }
+
+    // Second pass: process the winners
+    for (key, win) in winners {
+        let (set_id, project_id) = key;
+        let abs = std::path::absolute(&win.render.path)?.to_string_lossy().into_owned();
+        
+        // Skip if this exact file is already the preview
+        if indexer::preview_is_fresh(conn, set_id, &abs, win.size, &win.mtime)? {
+            s.unchanged += 1;
+            continue;
+        }
+
+        // If a primary preview already exists, ensure our new winner is strictly better
+        if let Some(sid) = set_id {
+            if let Ok(Some((db_conf, db_mtime))) = indexer::primary_preview_stats(conn, sid) {
+                if win.confidence < db_conf {
+                    continue; // DB already has a more confident match
+                } else if (win.confidence - db_conf).abs() < f64::EPSILON && win.mtime <= db_mtime {
+                    continue; // DB already has a newer or equally new match
+                }
+            }
+        }
+
+        match build_preview_row(&win.render.path, set_id, project_id, "discovered", win.confidence) {
+            Ok(row) => {
+                indexer::upsert_preview(conn, &row)?;
+                s.matched += 1;
+                log(format!(
+                    "matched ({:.2}) {} -> set {:?}",
+                    win.confidence,
+                    win.render.path.display(),
+                    set_id
+                ));
+            }
+            Err(e) => {
+                s.errors += 1;
+                log(format!("ERROR decoding {}: {}", win.render.path.display(), e));
             }
         }
     }

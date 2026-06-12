@@ -292,6 +292,7 @@ pub fn parse_set(als_path: &Path, project_dir: &Path) -> Result<SetSnapshot, Par
             live_version: None,
             schema_version: None,
             tempo: None,
+            tempos: Vec::new(),
             time_signature: None,
             tracks: Vec::new(),
             devices: Vec::new(),
@@ -353,6 +354,16 @@ pub fn parse_set(als_path: &Path, project_dir: &Path) -> Result<SetSnapshot, Par
     }
 
     st.snap.tempo = resolve(&st.tempo_cands, "tempo", &mut st.snap.warnings);
+    
+    let mut unique_tempos: Vec<f64> = Vec::new();
+    for &(v, _) in &st.tempo_cands {
+        let rounded = (v * 100.0).round() / 100.0;
+        if !unique_tempos.contains(&rounded) {
+            unique_tempos.push(rounded);
+        }
+    }
+    st.snap.tempos = unique_tempos;
+
     if let Some((n, d)) = resolve(&st.sig_cands, "time_signature", &mut st.snap.warnings) {
         st.snap.time_signature = Some(format!("{n}/{d}"));
     }

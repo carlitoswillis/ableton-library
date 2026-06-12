@@ -17,10 +17,18 @@ type SearchHit = {
   project: string;
   als_path: string;
   tempo: number | null;
+  tempos: number[];
   time_signature: string | null;
   live_version: string | null;
   has_preview: boolean;
   preview_duration: number | null;
+};
+
+const formatTempo = (tempo: number | null, tempos: number[] | undefined) => {
+  if (tempos && tempos.length > 1) {
+    return tempos.join(", ");
+  }
+  return tempo ?? "?";
 };
 
 type Stats = {
@@ -68,6 +76,7 @@ type Detail = {
   als_path: string;
   live_version: string | null;
   tempo: number | null;
+  tempos: number[];
   time_signature: string | null;
   warnings: string[] | null;
   tracks: { idx: number; kind: string; name: string | null; color: number | null }[];
@@ -114,6 +123,7 @@ export default function App() {
   const [watchFolders, setWatchFolders] = useState<[number, string][]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+  const [selectedSuggestions, setSelectedSuggestions] = useState<string[]>([]);
 
 
   const runSearch = useCallback(async () => {
@@ -167,6 +177,7 @@ export default function App() {
 
   const refreshSuggestions = useCallback(async () => {
     setLoadingSuggestions(true);
+    setSelectedSuggestions([]);
     try {
       const res = await invoke<Suggestion[]>("get_watch_suggestions");
       setSuggestions(res);
@@ -337,6 +348,42 @@ export default function App() {
       );
       refreshStats();
       runSearch();
+      refreshSuggestions();
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("cancelled")) {
+        setScanMsg("Scan cancelled");
+      } else {
+        setError(msg);
+      }
+      setShowProgressModal(false);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const bulkPreviewScan = async () => {
+    try {
+      setScanLogs([]);
+      setLiveStats({ indexed: 0, unchanged: 0, previews: 0, errors: 0 });
+      setShowProgressModal(true);
+      setScanning(true);
+      setError(null);
+      setScanMsg(null);
+      const s = await invoke<ScanSummary>("bulk_preview_scan");
+      setLiveStats({
+        indexed: s.indexed,
+        unchanged: s.unchanged,
+        previews: s.harvested,
+        errors: s.errors,
+      });
+      setScanMsg(
+        `Preview scan complete: ${s.harvested} preview(s) matched` +
+          (s.errors ? `, ${s.errors} errors` : ""),
+      );
+      refreshStats();
+      runSearch();
+      refreshSuggestions();
     } catch (e) {
       const msg = String(e);
       if (msg.includes("cancelled")) {
@@ -392,6 +439,42 @@ export default function App() {
     try {
       await invoke("ignore_watch_suggestion", { set_id: setId, audio_path: audioPath });
       refreshSuggestions();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const toggleSelectSuggestion = (key: string) => {
+    setSelectedSuggestions((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  };
+
+  const toggleSelectAllSuggestions = () => {
+    setSelectedSuggestions((prev) => {
+      if (prev.length === suggestions.length) {
+        return [];
+      } else {
+        return suggestions.map((s) => `${s.set_id}:${s.audio_path}`);
+      }
+    });
+  };
+
+  const linkSelectedSuggestions = async () => {
+    if (selectedSuggestions.length === 0) return;
+    try {
+      setError(null);
+      const matches = selectedSuggestions.map((key) => {
+        const firstColonIdx = key.indexOf(":");
+        const setId = parseInt(key.substring(0, firstColonIdx), 10);
+        const audioPath = key.substring(firstColonIdx + 1);
+        return [setId, audioPath];
+      });
+      await invoke("link_watch_suggestions", { matches });
+      setSelectedSuggestions([]);
+      refreshSuggestions();
+      runSearch();
+      refreshStats();
     } catch (e) {
       setError(String(e));
     }
@@ -636,6 +719,9 @@ export default function App() {
         <button className="scan-btn" onClick={pickAndScan} disabled={scanning}>
           {scanning ? "Scanning…" : "Scan folder…"}
         </button>
+        <button className="scan-btn" onClick={bulkPreviewScan} disabled={scanning} style={{ marginLeft: "10px" }} title="Match unmatched sets against their project folders and watch folders">
+          {scanning ? "Scanning Previews…" : "Scan Previews…"}
+        </button>
         <button
           className="scan-btn"
           style={{ marginLeft: "10px" }}
@@ -772,7 +858,7 @@ export default function App() {
                 >
                   <td className="proj">{h.project}</td>
                   <td className="set">{fileName(h.als_path)}</td>
-                  <td className="num">{h.tempo ?? "?"} bpm</td>
+                  <td className="num">{formatTempo(h.tempo, h.tempos)} bpm</td>
                   <td className="num">{h.time_signature ?? "?"}</td>
                   <td className="ver">{h.live_version?.replace("Ableton Live ", "") ?? ""}</td>
                   <td className="act">
@@ -848,7 +934,7 @@ export default function App() {
               )}
             </div>
             <p className="meta">
-              {detail.project} · {detail.tempo ?? "?"} bpm · {detail.time_signature ?? "?"} ·{" "}
+              {detail.project} · {formatTempo(detail.tempo, detail.tempos)} bpm · {detail.time_signature ?? "?"} ·{" "}
               {detail.live_version ?? "unknown version"}
             </p>
             {detail.preview_missing && (
@@ -1158,14 +1244,25 @@ export default function App() {
             <div className="watch-section" style={{ marginTop: "20px", borderTop: "1px solid var(--border)", paddingTop: "15px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <h3>Suggested Bounce Matches</h3>
-                <button
-                  className="open-btn ghost"
-                  style={{ padding: "4px 8px", fontSize: "11px" }}
-                  onClick={refreshSuggestions}
-                  disabled={loadingSuggestions}
-                >
-                  {loadingSuggestions ? "Scanning..." : "Scan/Refresh ↻"}
-                </button>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  {selectedSuggestions.length > 0 && (
+                    <button
+                      className="open-btn"
+                      style={{ padding: "4px 8px", fontSize: "11px", borderColor: "var(--accent)", color: "var(--accent)" }}
+                      onClick={linkSelectedSuggestions}
+                    >
+                      Link Selected ({selectedSuggestions.length})
+                    </button>
+                  )}
+                  <button
+                    className="open-btn ghost"
+                    style={{ padding: "4px 8px", fontSize: "11px" }}
+                    onClick={refreshSuggestions}
+                    disabled={loadingSuggestions}
+                  >
+                    {loadingSuggestions ? "Scanning..." : "Scan/Refresh ↻"}
+                  </button>
+                </div>
               </div>
 
               <div className="suggestions-list-container" style={{ marginTop: "8px" }}>
@@ -1184,52 +1281,69 @@ export default function App() {
                   <table className="queue-table">
                     <thead>
                       <tr>
+                        <th style={{ width: "30px", textAlign: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={suggestions.length > 0 && selectedSuggestions.length === suggestions.length}
+                            onChange={toggleSelectAllSuggestions}
+                          />
+                        </th>
                         <th>Ableton Set</th>
                         <th>Bounce / Match</th>
                         <th className="job-actions" style={{ width: "160px" }}>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {suggestions.map((s) => (
-                        <tr key={`${s.set_id}-${s.audio_path}`}>
-                          <td>
-                            <div className="queue-job-title">{s.project_name}</div>
-                            <div className="queue-job-path">{s.set_name}</div>
-                          </td>
-                          <td>
-                            <div className="queue-job-title" title={s.audio_path}>{s.file_name}</div>
-                            <div className="queue-job-path" style={{ color: "var(--accent)" }}>
-                              {Math.round(s.confidence * 100)}% match
-                            </div>
-                          </td>
-                          <td className="job-actions" style={{ width: "160px" }}>
-                            <button
-                              className="remove-job-btn"
-                              style={{ color: "var(--accent)", marginRight: "10px" }}
-                              onClick={() => playSuggestionTrack(s)}
-                              title="Play bounce to check match"
-                            >
-                              ▶ Play
-                            </button>
-                            <button
-                              className="remove-job-btn"
-                              style={{ color: "#85e3b2", marginRight: "10px" }}
-                              onClick={() => linkSuggestion(s.set_id, s.audio_path)}
-                              title="Use this bounce as the set preview"
-                            >
-                              ✓ Link
-                            </button>
-                            <button
-                              className="remove-job-btn"
-                              style={{ color: "#e38585" }}
-                              onClick={() => ignoreSuggestion(s.set_id, s.audio_path)}
-                              title="Don't suggest this match again"
-                            >
-                              × Ignore
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                      {suggestions.map((s) => {
+                        const key = `${s.set_id}:${s.audio_path}`;
+                        return (
+                          <tr key={key}>
+                            <td style={{ textAlign: "center", verticalAlign: "middle" }}>
+                              <input
+                                type="checkbox"
+                                checked={selectedSuggestions.includes(key)}
+                                onChange={() => toggleSelectSuggestion(key)}
+                              />
+                            </td>
+                            <td>
+                              <div className="queue-job-title">{s.project_name}</div>
+                              <div className="queue-job-path">{s.set_name}</div>
+                            </td>
+                            <td>
+                              <div className="queue-job-title" title={s.audio_path}>{s.file_name}</div>
+                              <div className="queue-job-path" style={{ color: "var(--accent)" }}>
+                                {Math.round(s.confidence * 100)}% match
+                              </div>
+                            </td>
+                            <td className="job-actions" style={{ width: "160px" }}>
+                              <button
+                                className="remove-job-btn"
+                                style={{ color: "var(--accent)", marginRight: "10px" }}
+                                onClick={() => playSuggestionTrack(s)}
+                                title="Play bounce to check match"
+                              >
+                                ▶ Play
+                              </button>
+                              <button
+                                className="remove-job-btn"
+                                style={{ color: "#85e3b2", marginRight: "10px" }}
+                                onClick={() => linkSuggestion(s.set_id, s.audio_path)}
+                                title="Use this bounce as the set preview"
+                              >
+                                ✓ Link
+                              </button>
+                              <button
+                                className="remove-job-btn"
+                                style={{ color: "#e38585" }}
+                                onClick={() => ignoreSuggestion(s.set_id, s.audio_path)}
+                                title="Don't suggest this match again"
+                              >
+                                × Ignore
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 )}
