@@ -923,15 +923,21 @@ pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
         return Ok(Vec::new());
     }
 
-    // Sets that already have a primary preview.
-    let mut previewed: HashSet<i64> = HashSet::new();
+    // "Already previewed" is judged at the PROJECT level (user decision
+    // 2026-06-11): if ANY preview exists for the set, a sibling set, or the
+    // project itself (project-level match), suggestions for it are shown but
+    // must never be auto-selected — replacements are explicit-only.
+    let mut previewed_projects: HashSet<i64> = HashSet::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT set_id FROM previews WHERE is_primary = 1 AND set_id IS NOT NULL",
+            "SELECT DISTINCT project_id FROM previews WHERE project_id IS NOT NULL
+             UNION
+             SELECT DISTINCT s.project_id FROM previews pv
+               JOIN sets s ON s.id = pv.set_id",
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
         for row in rows {
-            previewed.insert(row?);
+            previewed_projects.insert(row?);
         }
     }
 
@@ -946,7 +952,7 @@ pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
         }
 
         if let Some(m) = best_match(&normalize(&r.stem), &cands, 0.6) {
-            if let MatchTarget::Set { set_id, .. } = m.target {
+            if let MatchTarget::Set { set_id, project_id } = m.target {
                 // Check if this match is ignored in database
                 if indexer::is_match_ignored(conn, set_id, &abs)? {
                     continue;
@@ -985,7 +991,7 @@ pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
                     audio_path: abs,
                     file_name,
                     confidence: m.confidence,
-                    has_preview: previewed.contains(&set_id),
+                    has_preview: previewed_projects.contains(&project_id),
                 });
             }
         }
