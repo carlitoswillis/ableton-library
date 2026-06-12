@@ -17,7 +17,7 @@ fn none_if_blank(s: Option<String>) -> Option<String> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn search(
+async fn search(
     text: Option<String>,
     min_bpm: Option<f64>,
     max_bpm: Option<f64>,
@@ -37,13 +37,13 @@ fn search(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn inspect(set_id: i64) -> Result<Value, String> {
+async fn inspect(set_id: i64) -> Result<Value, String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
     indexer::set_detail(&conn, set_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn stats() -> Result<indexer::Stats, String> {
+async fn stats() -> Result<indexer::Stats, String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
     indexer::stats(&conn).map_err(|e| e.to_string())
 }
@@ -59,7 +59,7 @@ struct PreviewInfo {
 
 /// Primary preview (audio path + waveform peaks) for a set, if any.
 #[tauri::command(rename_all = "snake_case")]
-fn preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
+async fn preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
     let row = indexer::primary_preview(&conn, set_id).map_err(|e| e.to_string())?;
     Ok(row.map(|(audio_path, duration, peaks_json, confidence, source)| PreviewInfo {
@@ -75,18 +75,25 @@ fn preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
 
 /// Index a folder of Ableton projects (incremental; harvests in-folder
 /// renders as previews). Same engine as `ableton-scan scan`.
+///
+/// MUST be async + spawn_blocking: synchronous Tauri commands run on the
+/// MAIN thread and freeze the whole window (the beach ball incident).
 #[tauri::command(rename_all = "snake_case")]
-fn scan_folder(root: String) -> Result<ops::ScanSummary, String> {
-    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
-    let mut log = |_line: String| {}; // per-file progress not surfaced yet
-    ops::scan_library(&conn, std::path::Path::new(&root), false, true, &mut log)
-        .map_err(|e| e.to_string())
+async fn scan_folder(root: String) -> Result<ops::ScanSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+        let mut log = |_line: String| {}; // per-file progress not surfaced yet
+        ops::scan_library(&conn, std::path::Path::new(&root), false, true, &mut log)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Open the set in Ableton Live (default .als handler), or reveal it in Finder.
 /// Only ever opens paths stored in the catalog — never arbitrary input.
 #[tauri::command(rename_all = "snake_case")]
-fn open_set(set_id: i64, reveal: bool) -> Result<(), String> {
+async fn open_set(set_id: i64, reveal: bool) -> Result<(), String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
     let path = indexer::set_path(&conn, set_id).map_err(|e| e.to_string())?;
     if !std::path::Path::new(&path).exists() {
