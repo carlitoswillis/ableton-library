@@ -386,8 +386,13 @@ async fn bulk_preview_scan(
         .filter_map(Result::ok)
         .collect();
         
-        let known_samples = indexer::all_sample_paths(&conn).map_err(|e| e.to_string())?;
-        
+        // NOTE: lowercased — ops compares sample paths case-insensitively.
+        let known_samples: std::collections::HashSet<String> = indexer::all_sample_paths(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|p| p.to_lowercase())
+            .collect();
+
         for (pid, name, dir) in projects {
             if cancel_flag.load(Ordering::Relaxed) {
                 return Err("scan cancelled by user".to_string());
@@ -431,7 +436,7 @@ async fn scan_set_folder_previews(app: tauri::AppHandle, set_id: i64) -> Result<
                 "SELECT p.id, p.folder_path, p.name
                  FROM projects p JOIN sets s ON s.project_id = p.id
                  WHERE s.id = ?1",
-                rusqlite::params![set_id],
+                [set_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .map_err(|e| e.to_string())?;

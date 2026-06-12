@@ -978,7 +978,7 @@ pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
 
                 // Check if this audio path is already a preview for this set (just in case)
                 let already_exists: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM previews WHERE set_id = ?1 AND audio_path = ?2",
+                    "SELECT COUNT(*) FROM previews WHERE set_id = ?1 AND audio_path = ?2 COLLATE NOCASE",
                     rusqlite::params![set_id, abs],
                     |row| row.get(0),
                 )?;
