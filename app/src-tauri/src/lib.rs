@@ -214,6 +214,19 @@ async fn export_worker_loop(app: tauri::AppHandle) {
         // 2. Perform the export (saving inside the existing project folder next to the .als file)
         let als_parent = std::path::Path::new(&als_path).parent().unwrap().to_path_buf();
 
+        // Pre-flight (overwrite-dialog avoidance, user request 2026-06-11):
+        // if a render already exists next to the .als AND is at least as new
+        // as the set, skip Live entirely and just attach the existing file.
+        // Stale renders (set saved after the bounce) still re-render; the
+        // export script confirms any Replace dialog as a backstop.
+        let expected_output = als_parent.join(format!("{}.wav", set_stem));
+        let fresh_existing = (|| -> Option<bool> {
+            let wav_m = std::fs::metadata(&expected_output).ok()?.modified().ok()?;
+            let als_m = std::fs::metadata(&als_path).ok()?.modified().ok()?;
+            Some(wav_m >= als_m)
+        })()
+        .unwrap_or(false);
+
         let mut script_path = std::env::current_dir()
             .unwrap_or_default()
             .join("tools")
@@ -250,36 +263,41 @@ async fn export_worker_loop(app: tauri::AppHandle) {
         let live_app = live_app_path.to_string_lossy().into_owned();
         let output_dir_str = als_parent.to_string_lossy().into_owned();
 
-        // Run process
-        let status = tauri::async_runtime::spawn_blocking(move || {
-            std::process::Command::new("python3")
-                .arg(&script_path)
-                .arg("--set-path")
-                .arg(&als_path)
-                .arg("--output-dir")
-                .arg(&output_dir_str)
-                .arg("--live-app")
-                .arg(live_app)
-                .output()
-        })
-        .await;
-
         let mut error_msg = None;
         let mut success = false;
 
-        match status {
-            Ok(Ok(output)) if output.status.success() => {
-                success = true;
-            }
-            Ok(Ok(output)) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                error_msg = Some(format!("Script failed: {stderr}"));
-            }
-            Ok(Err(e)) => {
-                error_msg = Some(format!("Failed to execute python3 script: {e}"));
-            }
-            Err(e) => {
-                error_msg = Some(format!("Thread panic during command execution: {e}"));
+        if fresh_existing {
+            // Existing render is up to date — attach it, no Live involved.
+            success = true;
+        } else {
+            // Run process
+            let status = tauri::async_runtime::spawn_blocking(move || {
+                std::process::Command::new("python3")
+                    .arg(&script_path)
+                    .arg("--set-path")
+                    .arg(&als_path)
+                    .arg("--output-dir")
+                    .arg(&output_dir_str)
+                    .arg("--live-app")
+                    .arg(live_app)
+                    .output()
+            })
+            .await;
+
+            match status {
+                Ok(Ok(output)) if output.status.success() => {
+                    success = true;
+                }
+                Ok(Ok(output)) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                    error_msg = Some(format!("Script failed: {stderr}"));
+                }
+                Ok(Err(e)) => {
+                    error_msg = Some(format!("Failed to execute python3 script: {e}"));
+                }
+                Err(e) => {
+                    error_msg = Some(format!("Thread panic during command execution: {e}"));
+                }
             }
         }
 

@@ -103,7 +103,30 @@ tell application "System Events"
         delay 1
         keystroke return
         delay 2
-        
+
+        -- 6. If a "file already exists — Replace?" confirmation appeared
+        -- (e.g. the pre-delete failed on an iCloud-locked file), confirm it
+        -- so the queue never wedges. Guarded checks only — a blind extra
+        -- Return could toggle playback in Live.
+        try
+            if exists (button "Replace" of sheet 1 of sheet 1 of window 1) then
+                click button "Replace" of sheet 1 of sheet 1 of window 1
+                delay 1
+            end if
+        end try
+        try
+            if exists (button "Replace" of sheet 1 of window 1) then
+                click button "Replace" of sheet 1 of window 1
+                delay 1
+            end if
+        end try
+        try
+            if exists (window 1 whose subrole is "AXDialog") then
+                keystroke return
+                delay 1
+            end if
+        end try
+
     end tell
 end tell
 '''
