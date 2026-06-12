@@ -419,6 +419,46 @@ async fn bulk_preview_scan(
     .map_err(|e| e.to_string())?
 }
 
+/// Scan ONE project's folder for preview files (detail-pane action).
+/// Harvests renders inside the folder of the set's project; spawn_blocking
+/// because it decodes audio.
+#[tauri::command(rename_all = "snake_case")]
+async fn scan_set_folder_previews(app: tauri::AppHandle, set_id: i64) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+        let (pid, folder, name): (i64, String, String) = conn
+            .query_row(
+                "SELECT p.id, p.folder_path, p.name
+                 FROM projects p JOIN sets s ON s.project_id = p.id
+                 WHERE s.id = ?1",
+                rusqlite::params![set_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        let known_samples = indexer::all_sample_paths(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|p| p.to_lowercase())
+            .collect();
+        let app_clone = app.clone();
+        let mut log = move |line: String| {
+            let _ = app_clone.emit("scan-progress", line);
+        };
+        ops::harvest_folder_renders(
+            &conn,
+            std::path::Path::new(&folder),
+            &name,
+            pid,
+            &known_samples,
+            None,
+            &mut log,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Open the set in Ableton Live (default .als handler), or reveal it in Finder.
 /// Only ever opens paths stored in the catalog — never arbitrary input.
 #[tauri::command(rename_all = "snake_case")]
@@ -561,6 +601,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             search, inspect, stats, open_set, preview, scan_folder, cancel_scan, bulk_preview_scan,
+            scan_set_folder_previews,
             add_to_export_queue, add_to_export_queue_bulk, get_export_queue, remove_from_export_queue,
             clear_completed_jobs, toggle_export_queue, get_export_queue_active,
             retry_failed_jobs, remove_preview,

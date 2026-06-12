@@ -17,6 +17,18 @@ use previews::matching::{best_match, normalize, MatchTarget, SetCandidate};
 /// Progress sink: cli prints to stderr, the app may ignore or forward.
 pub type Log<'a> = &'a mut dyn FnMut(String);
 
+/// Key for path-identity comparisons (known-samples cross-check, dedupe).
+/// Lowercased because macOS filesystems are case-insensitive and path casing
+/// can drift between scans (user observation 2026-06-11).
+fn path_key(s: &str) -> String {
+    s.to_lowercase()
+}
+
+/// Lowercase every path in a set so lookups via `path_key` match.
+fn lowercase_paths(paths: HashSet<String>) -> HashSet<String> {
+    paths.into_iter().map(|p| p.to_lowercase()).collect()
+}
+
 /// A planned preview-decode job: name matching + DB filtering already done,
 /// only the expensive audio decode + peak extraction remains.
 #[derive(Debug, Clone)]
@@ -139,7 +151,7 @@ pub fn scan_library(
     // grow it incrementally as we ingest new sets so the harvest cross-check
     // is always up-to-date.
     let mut known_samples = if harvest {
-        indexer::all_sample_paths(conn)?
+        lowercase_paths(indexer::all_sample_paths(conn)?)
     } else {
         HashSet::new()
     };
@@ -271,7 +283,7 @@ pub fn scan_library(
                             // Add this set's sample paths to known_samples before harvest
                             if harvest {
                                 for sample in &snap.samples {
-                                    known_samples.insert(sample.path.clone());
+                                    known_samples.insert(path_key(&sample.path));
                                 }
                             }
 
@@ -422,7 +434,7 @@ pub fn plan_folder_harvest(
             }
         }
         let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
-        if known_samples.contains(&abs) {
+        if known_samples.contains(&path_key(&abs)) {
             continue;
         }
         let (set_id, project_id, confidence) =
@@ -579,7 +591,7 @@ pub fn hunt_renders(
     if cands.is_empty() {
         anyhow::bail!("catalog is empty — scan a projects folder first");
     }
-    let known_samples = indexer::all_sample_paths(conn)?;
+    let known_samples = lowercase_paths(indexer::all_sample_paths(conn)?);
     let renders = previews::discover_renders(roots, None)?;
     log(format!(
         "{} candidate audio file(s), matching against {} set(s)",
@@ -600,7 +612,7 @@ pub fn hunt_renders(
 
     for r in &renders {
         let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
-        if known_samples.contains(&abs) {
+        if known_samples.contains(&path_key(&abs)) {
             s.samples_skipped += 1;
             if verbose {
                 log(format!("skipped (known sample): {}", r.path.display()));
@@ -899,9 +911,12 @@ pub struct Suggestion {
     pub audio_path: String,
     pub file_name: String,
     pub confidence: f64,
-    /// The set already has a primary preview — shown so users can swap in a
-    /// better/newer bounce, but the UI should not auto-select these.
+    /// The set's PROJECT already has a preview somewhere — shown so users can
+    /// swap in a better/newer bounce, but the UI must not auto-select these.
     pub has_preview: bool,
+    /// This set's current primary preview file, if any — displayed so the
+    /// user can compare/reconsider what is linked after the fact.
+    pub current_preview: Option<String>,
 }
 
 pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
@@ -943,11 +958,14 @@ pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
 
     // 4. Match
     let mut suggestions = Vec::new();
-    let known_samples = indexer::all_sample_paths(conn)?;
+    let known_samples = lowercase_paths(indexer::all_sample_paths(conn)?);
+    // Cache each set's current primary preview path (shown for reconsideration).
+    let mut primary_cache: std::collections::HashMap<i64, Option<String>> =
+        std::collections::HashMap::new();
 
     for r in &renders {
         let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
-        if known_samples.contains(&abs) {
+        if known_samples.contains(&path_key(&abs)) {
             continue;
         }
 
@@ -984,6 +1002,16 @@ pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
                     .map(|x| x.to_string_lossy().into_owned())
                     .unwrap_or_else(|| abs.clone());
 
+                let current_preview = primary_cache
+                    .entry(set_id)
+                    .or_insert_with(|| {
+                        indexer::primary_preview(conn, set_id)
+                            .ok()
+                            .flatten()
+                            .map(|(path, ..)| path)
+                    })
+                    .clone();
+
                 suggestions.push(Suggestion {
                     set_id,
                     set_name,
@@ -992,6 +1020,7 @@ pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
                     file_name,
                     confidence: m.confidence,
                     has_preview: previewed_projects.contains(&project_id),
+                    current_preview,
                 });
             }
         }

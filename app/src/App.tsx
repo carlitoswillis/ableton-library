@@ -69,6 +69,7 @@ type Suggestion = {
   file_name: string;
   confidence: number;
   has_preview: boolean;
+  current_preview: string | null;
 };
 
 type Detail = {
@@ -1068,6 +1069,30 @@ export default function App() {
               <button className="open-btn ghost" onClick={() => openInLive(detail.set_id, true)}>
                 Reveal in Finder
               </button>
+              <button
+                className="open-btn ghost"
+                onClick={async () => {
+                  try {
+                    setError(null);
+                    const n = await invoke<number>("scan_set_folder_previews", {
+                      set_id: detail.set_id,
+                    });
+                    openDetail(detail.set_id);
+                    runSearch();
+                    refreshStats();
+                    setError(
+                      n > 0
+                        ? `Note: ${n} preview(s) harvested from the project folder.`
+                        : "Note: no new preview files found in the project folder."
+                    );
+                  } catch (e) {
+                    setError(String(e));
+                  }
+                }}
+                title="Scan this project's folder for bounce/render files to use as previews"
+              >
+                Scan Folder for Previews
+              </button>
               {(() => {
                 const existingJob = queue.find((j) => j.set_id === detail.set_id);
                 if (existingJob) {
@@ -1490,6 +1515,7 @@ export default function App() {
                           set_name: string;
                           project_name: string;
                           has_preview: boolean;
+                          current_preview: string | null;
                           items: Suggestion[];
                         };
                         const groups: Group[] = [];
@@ -1502,6 +1528,7 @@ export default function App() {
                               set_name: s.set_name,
                               project_name: s.project_name,
                               has_preview: s.has_preview,
+                              current_preview: s.current_preview,
                               items: [],
                             };
                             byId.set(s.set_id, g);
@@ -1521,13 +1548,52 @@ export default function App() {
                                 {g.project_name}
                               </span>
                               {g.has_preview && (
-                                <span className="suggestion-badge" title="This set already has a preview — linking replaces it as primary">
+                                <span className="suggestion-badge" title="This project already has a preview — linking replaces it as primary">
                                   has preview
                                 </span>
                               )}
                               {g.items.length > 1 && (
                                 <span className="queue-job-path" style={{ marginLeft: "8px" }}>
                                   {g.items.length} matches
+                                </span>
+                              )}
+                              {g.current_preview && (
+                                <span className="queue-job-path" style={{ marginLeft: "8px" }}>
+                                  current: {fileName(g.current_preview)}
+                                  <button
+                                    className="remove-job-btn"
+                                    style={{ color: "var(--accent)", marginLeft: "8px" }}
+                                    onClick={() =>
+                                      setTrack({
+                                        setId: g.set_id,
+                                        title: g.set_name.replace(/\.als$/, ""),
+                                        subtitle: `${g.project_name} · current preview`,
+                                        src: convertFileSrc(g.current_preview!),
+                                        peaks: [],
+                                        duration: null,
+                                      })
+                                    }
+                                    title="Play the current preview"
+                                  >
+                                    ▶
+                                  </button>
+                                  <button
+                                    className="remove-job-btn"
+                                    style={{ color: "#e38585", marginLeft: "6px" }}
+                                    onClick={async () => {
+                                      try {
+                                        await invoke("remove_preview", { set_id: g.set_id });
+                                        refreshSuggestions();
+                                        runSearch();
+                                        refreshStats();
+                                      } catch (e) {
+                                        setError(String(e));
+                                      }
+                                    }}
+                                    title="Unlink the current preview (the file stays on disk)"
+                                  >
+                                    × Unlink
+                                  </button>
                                 </span>
                               )}
                             </td>

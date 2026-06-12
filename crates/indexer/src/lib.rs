@@ -394,7 +394,7 @@ pub fn preview_is_fresh(
 ) -> Result<bool> {
     let row: Option<(u64, String)> = conn
         .query_row(
-            "SELECT size, mtime FROM previews WHERE audio_path = ?2
+            "SELECT size, mtime FROM previews WHERE audio_path = ?2 COLLATE NOCASE
              AND ((?1 IS NULL AND set_id IS NULL) OR set_id = ?1)",
             params![set_id, audio_path],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -486,10 +486,9 @@ pub fn remove_preview(conn: &Connection, set_id: i64) -> Result<Option<String>> 
     })?;
 
     if let Some(audio_path) = preview {
-        let path = std::path::Path::new(&audio_path);
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
-        }
+        // DB-only: NEVER delete the audio file itself. Bounces are the user's
+        // work product; unlinking a preview must not destroy it (catalog
+        // principle: files are referenced, not owned).
         conn.execute("DELETE FROM previews WHERE set_id = ?1 AND audio_path = ?2", params![set_id, audio_path])?;
         recompute_primary(conn, set_id)?;
         Ok(Some(audio_path))
@@ -1051,7 +1050,7 @@ pub fn add_ignored_match(conn: &Connection, set_id: i64, audio_path: &str) -> Re
 
 pub fn is_match_ignored(conn: &Connection, set_id: i64, audio_path: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM ignored_matches WHERE set_id = ?1 AND audio_path = ?2",
+        "SELECT COUNT(*) FROM ignored_matches WHERE set_id = ?1 AND audio_path = ?2 COLLATE NOCASE",
         params![set_id, audio_path],
         |r| r.get(0),
     )?;
