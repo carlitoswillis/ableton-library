@@ -109,8 +109,12 @@ export default function App() {
   }, [refreshStats]);
 
   useEffect(() => {
+    let active = true;
+    let unsubscribed = false;
     let unlistenFn: (() => void) | null = null;
+
     listen<string>("scan-progress", (event) => {
+      if (!active) return;
       const line = event.payload;
       setScanLogs((prev) => [...prev, line]);
       if (line.startsWith("indexed")) {
@@ -122,9 +126,17 @@ export default function App() {
       }
     }).then((unsub) => {
       unlistenFn = unsub;
+      if (unsubscribed) {
+        unsub();
+      }
     });
+
     return () => {
-      if (unlistenFn) unlistenFn();
+      active = false;
+      unsubscribed = true;
+      if (unlistenFn) {
+        unlistenFn();
+      }
     };
   }, []);
 
