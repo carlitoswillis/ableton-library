@@ -116,9 +116,22 @@ CREATE TABLE IF NOT EXISTS export_jobs (
 CREATE INDEX IF NOT EXISTS idx_export_jobs_status ON export_jobs(status);
 "#;
 
+/// v4: watch folders and ignored matches.
+const SCHEMA_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS watch_folders (
+    id   INTEGER PRIMARY KEY,
+    path TEXT UNIQUE NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ignored_matches (
+    set_id     INTEGER NOT NULL REFERENCES sets(id) ON DELETE CASCADE,
+    audio_path TEXT NOT NULL,
+    PRIMARY KEY (set_id, audio_path)
+);
+"#;
+
 /// Current schema version. Migrations upgrade older catalogs in place;
 /// catalogs NEWER than this build are refused.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// Open (creating if needed) the index database, migrating if needed.
 pub fn open(db_path: &Path) -> Result<Connection> {
@@ -143,6 +156,7 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(SCHEMA_V2)?;
         conn.execute_batch(SCHEMA_V3)?;
+        conn.execute_batch(SCHEMA_V4)?;
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         return Ok(conn);
     }
@@ -154,12 +168,17 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     if version == 2 {
         conn.execute_batch(SCHEMA_V3)?;
         version = 3;
+    }
+    if version == 3 {
+        conn.execute_batch(SCHEMA_V4)?;
+        version = 4;
         conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
     }
     debug_assert_eq!(version, SCHEMA_VERSION);
     conn.execute_batch(SCHEMA)?; // idempotent (IF NOT EXISTS)
     conn.execute_batch(SCHEMA_V2)?;
     conn.execute_batch(SCHEMA_V3)?;
+    conn.execute_batch(SCHEMA_V4)?;
     Ok(conn)
 }
 
@@ -930,6 +949,43 @@ pub fn reset_stale_export_jobs(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub fn add_watch_folder(conn: &Connection, path: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO watch_folders (path) VALUES (?1) ON CONFLICT(path) DO NOTHING",
+        params![path],
+    )?;
+    Ok(())
+}
+
+pub fn remove_watch_folder(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM watch_folders WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn list_watch_folders(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare("SELECT id, path FROM watch_folders ORDER BY path")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn add_ignored_match(conn: &Connection, set_id: i64, audio_path: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO ignored_matches (set_id, audio_path) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+        params![set_id, audio_path],
+    )?;
+    Ok(())
+}
+
+pub fn is_match_ignored(conn: &Connection, set_id: i64, audio_path: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM ignored_matches WHERE set_id = ?1 AND audio_path = ?2",
+        params![set_id, audio_path],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -978,6 +1034,45 @@ mod tests {
         // Primary preview should now be None
         let p = primary_preview(&conn, 1)?;
         assert!(p.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_watch_folders_and_ignored_matches() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(SCHEMA_V2)?;
+        conn.execute_batch(SCHEMA_V3)?;
+        conn.execute_batch(SCHEMA_V4)?;
+
+        // Insert project and set to satisfy foreign key constraint on ignored_matches
+        let project_id = upsert_project(&conn, "/path/to/project", "My Project", "2026-06-11T12:00:00+00:00")?;
+        conn.execute(
+            "INSERT INTO sets (id, project_id, als_path, file_size, mtime, content_hash, warnings)
+             VALUES (1, ?1, '/path/to/project/set.als', 100, '2026-06-11T12:00:00+00:00', 'hash', '[]')",
+            params![project_id],
+        )?;
+
+        // Test watch folders
+        add_watch_folder(&conn, "/path/to/watch1")?;
+        add_watch_folder(&conn, "/path/to/watch2")?;
+        add_watch_folder(&conn, "/path/to/watch1")?; // duplicate check
+
+        let list = list_watch_folders(&conn)?;
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].1, "/path/to/watch1");
+        assert_eq!(list[1].1, "/path/to/watch2");
+
+        remove_watch_folder(&conn, list[0].0)?;
+        let list = list_watch_folders(&conn)?;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].1, "/path/to/watch2");
+
+        // Test ignored matches
+        assert!(!is_match_ignored(&conn, 1, "/path/to/audio.wav")?);
+        add_ignored_match(&conn, 1, "/path/to/audio.wav")?;
+        assert!(is_match_ignored(&conn, 1, "/path/to/audio.wav")?);
 
         Ok(())
     }

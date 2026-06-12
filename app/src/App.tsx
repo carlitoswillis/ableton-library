@@ -53,6 +53,15 @@ type ExportJob = {
   completed_at: string | null;
 };
 
+type Suggestion = {
+  set_id: number;
+  set_name: string;
+  project_name: string;
+  audio_path: string;
+  file_name: string;
+  confidence: number;
+};
+
 type Detail = {
   set_id: number;
   project: string;
@@ -100,6 +109,11 @@ export default function App() {
   const [queue, setQueue] = useState<ExportJob[]>([]);
   const [queueActive, setQueueActive] = useState(false);
   const [showQueueModal, setShowQueueModal] = useState(false);
+  const [showWatchModal, setShowWatchModal] = useState(false);
+  const [watchFolders, setWatchFolders] = useState<[number, string][]>([]);
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+
 
   const runSearch = useCallback(async () => {
     try {
@@ -139,6 +153,28 @@ export default function App() {
       setError(String(e));
     }
   }, []);
+
+  const refreshWatchFolders = useCallback(async () => {
+    try {
+      const res = await invoke<[number, string][]>("list_watch_folders");
+      setWatchFolders(res);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  const refreshSuggestions = useCallback(async () => {
+    setLoadingSuggestions(true);
+    try {
+      const res = await invoke<Suggestion[]>("get_watch_suggestions");
+      setSuggestions(res);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoadingSuggestions(false);
+    }
+  }, []);
+
 
   const addToQueue = async (setId: number) => {
     try {
@@ -197,7 +233,9 @@ export default function App() {
   useEffect(() => {
     refreshStats();
     refreshQueue();
-  }, [refreshStats, refreshQueue]);
+    refreshWatchFolders();
+    refreshSuggestions();
+  }, [refreshStats, refreshQueue, refreshWatchFolders, refreshSuggestions]);
 
   useEffect(() => {
     let active = true;
@@ -309,6 +347,65 @@ export default function App() {
       setScanning(false);
     }
   };
+
+  const addWatchFolder = async () => {
+    try {
+      const folder = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "Select Watch Folder",
+      });
+      if (folder) {
+        await invoke("add_watch_folder", { path: folder as string });
+        refreshWatchFolders();
+        refreshSuggestions();
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const removeWatchFolder = async (id: number) => {
+    try {
+      await invoke("remove_watch_folder", { id });
+      refreshWatchFolders();
+      refreshSuggestions();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const linkSuggestion = async (setId: number, audioPath: string) => {
+    try {
+      await invoke("link_watch_suggestion", { set_id: setId, audio_path: audioPath });
+      refreshSuggestions();
+      runSearch();
+      refreshStats();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const ignoreSuggestion = async (setId: number, audioPath: string) => {
+    try {
+      await invoke("ignore_watch_suggestion", { set_id: setId, audio_path: audioPath });
+      refreshSuggestions();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const playSuggestionTrack = (s: Suggestion) => {
+    setTrack({
+      setId: s.set_id,
+      title: s.set_name.replace(/\.als$/, ""),
+      subtitle: `${s.project_name} · Bounce Match (${Math.round(s.confidence * 100)}% match)`,
+      src: convertFileSrc(s.audio_path),
+      peaks: [],
+      duration: null,
+    });
+  };
+
 
   const openDetail = async (id: number) => {
     try {
@@ -544,6 +641,18 @@ export default function App() {
         >
           {queue.some(j => j.status === 'processing') ? "Rendering…" : "Render Queue"} ({queue.filter(j => j.status === 'pending' || j.status === 'processing').length})
         </button>
+        <button
+          className="scan-btn"
+          style={{ marginLeft: "10px" }}
+          onClick={() => {
+            setShowWatchModal(true);
+            refreshWatchFolders();
+            refreshSuggestions();
+          }}
+        >
+          Watch Folders {suggestions.length > 0 && `(${suggestions.length})`}
+        </button>
+
       </header>
 
       {scanning && !showProgressModal && (
@@ -988,7 +1097,144 @@ export default function App() {
         </div>
       )}
 
+      {showWatchModal && (
+        <div className="modal-overlay" onClick={() => setShowWatchModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="modal-title">Watch Folders</h2>
+              <button
+                className="modal-close-btn"
+                onClick={() => setShowWatchModal(false)}
+                title="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="watch-section">
+              <h3>Managed Folders</h3>
+              <p className="hint">
+                Add folders containing bounces/exports (e.g., your generic Music/Bounces directory).
+                We will match these audio files against sets in your library that don't have previews.
+              </p>
+              
+              <div className="watch-folders-list">
+                {watchFolders.length === 0 ? (
+                  <div className="empty-small">No watch folders added yet.</div>
+                ) : (
+                  <ul className="watch-list">
+                    {watchFolders.map(([id, path]) => (
+                      <li key={id} className="watch-item">
+                        <span className="watch-path" title={path}>{path}</span>
+                        <button
+                          className="watch-remove-btn"
+                          onClick={() => removeWatchFolder(id)}
+                          title="Remove this folder"
+                        >
+                          ×
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <button className="open-btn" onClick={addWatchFolder}>
+                + Add Watch Folder
+              </button>
+            </div>
+
+            <div className="watch-section" style={{ marginTop: "20px", borderTop: "1px solid var(--border)", paddingTop: "15px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <h3>Suggested Bounce Matches</h3>
+                <button
+                  className="open-btn ghost"
+                  style={{ padding: "4px 8px", fontSize: "11px" }}
+                  onClick={refreshSuggestions}
+                  disabled={loadingSuggestions}
+                >
+                  {loadingSuggestions ? "Scanning..." : "Scan/Refresh ↻"}
+                </button>
+              </div>
+
+              <div className="suggestions-list-container" style={{ marginTop: "8px" }}>
+                {loadingSuggestions ? (
+                  <div className="loading-container">
+                    <span className="pulse-dot" /> Scanning watch folders for matching audio files...
+                  </div>
+                ) : suggestions.length === 0 ? (
+                  <div className="empty" style={{ padding: "32px 16px" }}>
+                    <p>No suggested matches found.</p>
+                    <p className="hint" style={{ fontSize: "11px" }}>
+                      Make sure your watch folders contain audio files that match set filenames or project folder names.
+                    </p>
+                  </div>
+                ) : (
+                  <table className="queue-table">
+                    <thead>
+                      <tr>
+                        <th>Ableton Set</th>
+                        <th>Bounce / Match</th>
+                        <th className="job-actions" style={{ width: "160px" }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {suggestions.map((s) => (
+                        <tr key={`${s.set_id}-${s.audio_path}`}>
+                          <td>
+                            <div className="queue-job-title">{s.project_name}</div>
+                            <div className="queue-job-path">{s.set_name}</div>
+                          </td>
+                          <td>
+                            <div className="queue-job-title" title={s.audio_path}>{s.file_name}</div>
+                            <div className="queue-job-path" style={{ color: "var(--accent)" }}>
+                              {Math.round(s.confidence * 100)}% match
+                            </div>
+                          </td>
+                          <td className="job-actions" style={{ width: "160px" }}>
+                            <button
+                              className="remove-job-btn"
+                              style={{ color: "var(--accent)", marginRight: "10px" }}
+                              onClick={() => playSuggestionTrack(s)}
+                              title="Play bounce to check match"
+                            >
+                              ▶ Play
+                            </button>
+                            <button
+                              className="remove-job-btn"
+                              style={{ color: "#85e3b2", marginRight: "10px" }}
+                              onClick={() => linkSuggestion(s.set_id, s.audio_path)}
+                              title="Use this bounce as the set preview"
+                            >
+                              ✓ Link
+                            </button>
+                            <button
+                              className="remove-job-btn"
+                              style={{ color: "#e38585" }}
+                              onClick={() => ignoreSuggestion(s.set_id, s.audio_path)}
+                              title="Don't suggest this match again"
+                            >
+                              × Ignore
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button className="open-btn" onClick={() => setShowWatchModal(false)}>
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {track && <PlayerBar track={track} onClose={() => setTrack(null)} />}
+
     </div>
   );
 }

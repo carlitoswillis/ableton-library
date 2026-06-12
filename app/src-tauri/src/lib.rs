@@ -377,6 +377,42 @@ async fn remove_preview(set_id: i64) -> Result<bool, String> {
     Ok(deleted.is_some())
 }
 
+#[tauri::command(rename_all = "snake_case")]
+async fn add_watch_folder(path: String) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::add_watch_folder(&conn, &path).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn remove_watch_folder(id: i64) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::remove_watch_folder(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn list_watch_folders() -> Result<Vec<(i64, String)>, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::list_watch_folders(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn get_watch_suggestions() -> Result<Vec<ops::Suggestion>, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    ops::get_watch_suggestions(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn ignore_watch_suggestion(set_id: i64, audio_path: String) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::add_ignored_match(&conn, set_id, &audio_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn link_watch_suggestion(set_id: i64, audio_path: String) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    ops::attach(&conn, set_id, std::path::Path::new(&audio_path)).map_err(|e| e.to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(ScanState::default())
@@ -399,9 +435,11 @@ pub fn run() {
             search, inspect, stats, open_set, preview, scan_folder, cancel_scan,
             add_to_export_queue, get_export_queue, remove_from_export_queue,
             clear_completed_jobs, toggle_export_queue, get_export_queue_active,
-            retry_failed_jobs, remove_preview
+            retry_failed_jobs, remove_preview,
+            add_watch_folder, remove_watch_folder, list_watch_folders,
+            get_watch_suggestions, ignore_watch_suggestion, link_watch_suggestion
         ])
-
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

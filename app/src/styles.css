@@ -863,3 +863,103 @@ input:checked + .slider:before {
   border-color: var(--accent);
   background-color: #1e1e26;
 }
+
+/* Watch Folders styles */
+.watch-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.watch-section h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.watch-section .hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--dim);
+  line-height: 1.4;
+}
+
+.watch-folders-list {
+  background: rgba(0, 0, 0, 0.15);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.empty-small {
+  padding: 12px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.watch-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.watch-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.watch-item:last-child {
+  border-bottom: none;
+}
+
+.watch-path {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: calc(100% - 24px);
+}
+
+.watch-remove-btn {
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  transition: color 0.1s ease;
+}
+
+.watch-remove-btn:hover {
+  color: #ff6b6b;
+}
+
+.loading-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 24px;
+  font-size: 12px;
+  color: var(--dim);
+  justify-content: center;
+}
+
+.suggestions-list-container {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.15);
+}
+

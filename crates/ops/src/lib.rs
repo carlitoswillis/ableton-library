@@ -308,3 +308,127 @@ fn catalog_candidates(conn: &Connection) -> Result<Vec<SetCandidate>> {
     }
     Ok(out)
 }
+
+#[derive(Debug, serde::Serialize)]
+pub struct Suggestion {
+    pub set_id: i64,
+    pub set_name: String,
+    pub project_name: String,
+    pub audio_path: String,
+    pub file_name: String,
+    pub confidence: f64,
+}
+
+/// Helper to get candidates for sets that do NOT have a primary preview.
+fn catalog_candidates_without_previews(conn: &Connection) -> Result<Vec<SetCandidate>> {
+    let mut out = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT s.id, p.id, s.als_path, p.name,
+                (SELECT COUNT(*) FROM sets s2 WHERE s2.project_id = p.id)
+         FROM sets s JOIN projects p ON p.id = s.project_id
+         WHERE NOT EXISTS (SELECT 1 FROM previews pv WHERE pv.set_id = s.id AND pv.is_primary = 1)",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, i64>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (set_id, project_id, als_path, project_name, count) = row?;
+        let stem = Path::new(&als_path)
+            .file_stem()
+            .map(|x| x.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        out.push(SetCandidate {
+            set_id,
+            project_id,
+            norm_stem: normalize(&stem),
+            norm_project: normalize(project_name.trim_end_matches(" Project")),
+            project_set_count: count as usize,
+        });
+    }
+    Ok(out)
+}
+
+pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
+    // 1. List watch folders
+    let watch_folders = indexer::list_watch_folders(conn)?;
+    if watch_folders.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 2. Discover audio files in watch folders
+    let roots: Vec<PathBuf> = watch_folders.iter().map(|(_, p)| PathBuf::from(p)).collect();
+    let renders = previews::discover_renders(&roots, Some(3))?; // limit depth to 3 for watch folders
+
+    // 3. Get sets without previews
+    let cands = catalog_candidates_without_previews(conn)?;
+    if cands.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 4. Match
+    let mut suggestions = Vec::new();
+    let known_samples = indexer::all_sample_paths(conn)?;
+
+    for r in &renders {
+        let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
+        if known_samples.contains(&abs) {
+            continue;
+        }
+
+        if let Some(m) = best_match(&normalize(&r.stem), &cands, 0.6) {
+            if let MatchTarget::Set { set_id, .. } = m.target {
+                // Check if this match is ignored in database
+                if indexer::is_match_ignored(conn, set_id, &abs)? {
+                    continue;
+                }
+
+                // Check if this audio path is already a preview for this set (just in case)
+                let already_exists: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM previews WHERE set_id = ?1 AND audio_path = ?2",
+                    rusqlite::params![set_id, abs],
+                    |row| row.get(0),
+                )?;
+                if already_exists > 0 {
+                    continue;
+                }
+
+                // Get details about this set
+                let (als_path, project_name): (String, String) = conn.query_row(
+                    "SELECT s.als_path, p.name FROM sets s JOIN projects p ON p.id = s.project_id WHERE s.id = ?1",
+                    rusqlite::params![set_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+
+                let set_name = Path::new(&als_path)
+                    .file_name()
+                    .map(|x| x.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| als_path.clone());
+
+                let file_name = r.path.file_name()
+                    .map(|x| x.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| abs.clone());
+
+                suggestions.push(Suggestion {
+                    set_id,
+                    set_name,
+                    project_name,
+                    audio_path: abs,
+                    file_name,
+                    confidence: m.confidence,
+                });
+            }
+        }
+    }
+
+    // Sort suggestions by confidence DESC
+    suggestions.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(suggestions)
+}
+
