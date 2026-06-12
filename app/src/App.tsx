@@ -41,6 +41,18 @@ type PreviewInfo = {
   source: string;
 };
 
+type ExportJob = {
+  id: number;
+  set_id: number;
+  als_path: string;
+  project_name: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
 type Detail = {
   set_id: number;
   project: string;
@@ -79,6 +91,10 @@ export default function App() {
   });
   const logConsoleRef = useRef<HTMLDivElement | null>(null);
 
+  const [queue, setQueue] = useState<ExportJob[]>([]);
+  const [queueActive, setQueueActive] = useState(false);
+  const [showQueueModal, setShowQueueModal] = useState(false);
+
   const runSearch = useCallback(async () => {
     try {
       setError(null);
@@ -104,9 +120,64 @@ export default function App() {
     invoke<Stats>("stats").then(setStats).catch((e) => setError(String(e)));
   }, []);
 
+  const refreshQueue = useCallback(async () => {
+    try {
+      const q = await invoke<ExportJob[]>("get_export_queue");
+      setQueue(q);
+      const active = await invoke<boolean>("get_export_queue_active");
+      setQueueActive(active);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  const addToQueue = async (setId: number) => {
+    try {
+      setError(null);
+      await invoke("add_to_export_queue", { set_id: setId });
+      refreshQueue();
+      refreshStats();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const removeFromQueue = async (jobId: number) => {
+    try {
+      setError(null);
+      await invoke("remove_from_export_queue", { job_id: jobId });
+      refreshQueue();
+      refreshStats();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const clearCompleted = async () => {
+    try {
+      setError(null);
+      await invoke("clear_completed_jobs");
+      refreshQueue();
+      refreshStats();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const toggleQueue = async (active: boolean) => {
+    try {
+      setError(null);
+      await invoke("toggle_export_queue", { active });
+      setQueueActive(active);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   useEffect(() => {
     refreshStats();
-  }, [refreshStats]);
+    refreshQueue();
+  }, [refreshStats, refreshQueue]);
 
   useEffect(() => {
     let active = true;
@@ -139,6 +210,31 @@ export default function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unsubscribed = false;
+    let unlistenFn: (() => void) | null = null;
+
+    listen<void>("export-queue-updated", () => {
+      if (!active) return;
+      refreshQueue();
+      refreshStats();
+    }).then((unsub) => {
+      unlistenFn = unsub;
+      if (unsubscribed) {
+        unsub();
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubscribed = true;
+      if (unlistenFn) {
+        unlistenFn();
+      }
+    };
+  }, [refreshQueue, refreshStats]);
 
   useEffect(() => {
     if (logConsoleRef.current) {
@@ -245,6 +341,13 @@ export default function App() {
         {scanMsg && <span className="scan-msg">{scanMsg}</span>}
         <button className="scan-btn" onClick={pickAndScan} disabled={scanning}>
           {scanning ? "Scanning…" : "Scan folder…"}
+        </button>
+        <button
+          className="scan-btn"
+          style={{ marginLeft: "10px" }}
+          onClick={() => setShowQueueModal(true)}
+        >
+          {queue.some(j => j.status === 'processing') ? "Rendering…" : "Render Queue"} ({queue.filter(j => j.status === 'pending' || j.status === 'processing').length})
         </button>
       </header>
 
@@ -365,6 +468,50 @@ export default function App() {
               <button className="open-btn ghost" onClick={() => openInLive(detail.set_id, true)}>
                 Reveal in Finder
               </button>
+              {(() => {
+                const existingJob = queue.find((j) => j.set_id === detail.set_id);
+                if (existingJob) {
+                  if (existingJob.status === "processing") {
+                    return (
+                      <button className="open-btn warning" disabled>
+                        Rendering...
+                      </button>
+                    );
+                  } else if (existingJob.status === "pending") {
+                    return (
+                      <button
+                        className="open-btn ghost"
+                        onClick={() => removeFromQueue(existingJob.id)}
+                        title="Click to remove from queue"
+                      >
+                        Queued (Pending) ×
+                      </button>
+                    );
+                  } else if (existingJob.status === "failed") {
+                    return (
+                      <button
+                        className="open-btn danger-btn"
+                        onClick={() => addToQueue(detail.set_id)}
+                        title={`Failed: ${existingJob.error}. Click to retry.`}
+                      >
+                        Retry Render ↻
+                      </button>
+                    );
+                  } else {
+                    return (
+                      <button className="open-btn ghost" onClick={() => addToQueue(detail.set_id)}>
+                        Re-render ↻
+                      </button>
+                    );
+                  }
+                } else {
+                  return (
+                    <button className="open-btn ghost" onClick={() => addToQueue(detail.set_id)}>
+                      Queue Render
+                    </button>
+                  );
+                }
+              })()}
             </div>
             <p className="meta">
               {detail.project} · {detail.tempo ?? "?"} bpm · {detail.time_signature ?? "?"} ·{" "}
@@ -490,6 +637,119 @@ export default function App() {
                 onClick={() => setShowProgressModal(false)}
               >
                 {scanning ? "Scanning..." : "Done"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showQueueModal && (
+        <div className="modal-overlay" onClick={() => setShowQueueModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="modal-title">Automated Render Queue</h2>
+              <button
+                className="modal-close-btn"
+                onClick={() => setShowQueueModal(false)}
+                title="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="queue-toggle-container">
+              <div className="queue-toggle-info">
+                <span className="queue-toggle-title">
+                  {queueActive ? "Auto-Export: Active" : "Auto-Export: Paused"}
+                </span>
+                <span className="queue-toggle-desc">
+                  When active, a background worker runs Ableton Live to render previews.
+                </span>
+              </div>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={queueActive}
+                  onChange={(e) => toggleQueue(e.target.checked)}
+                />
+                <span className="slider" />
+              </label>
+            </div>
+
+            <div className="queue-warning-box">
+              <strong>⚠️ Automation Notice:</strong> This uses AppleScript to drive Ableton Live.
+              Ableton Live will open and run in the foreground while rendering.
+              Please do not use your mouse or keyboard while a render is in progress.
+            </div>
+
+            <div className="queue-list-container">
+              {queue.length === 0 ? (
+                <div className="empty" style={{ padding: "32px 16px" }}>
+                  <p>Queue is empty.</p>
+                  <p className="hint" style={{ fontSize: "11px" }}>
+                    Select a set from the list and click "Queue Render" to add jobs.
+                  </p>
+                </div>
+              ) : (
+                <table className="queue-table">
+                  <thead>
+                    <tr>
+                      <th>Project / Set</th>
+                      <th>Status</th>
+                      <th className="job-actions">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {queue.map((job) => (
+                      <tr key={job.id}>
+                        <td>
+                          <div className="queue-job-title">{job.project_name}</div>
+                          <div className="queue-job-path" title={job.als_path}>
+                            {job.als_path.split("/").pop()}
+                          </div>
+                          {job.error && (
+                            <div className="job-error-text">
+                              Error: {job.error}
+                            </div>
+                          )}
+                        </td>
+                        <td>
+                          <span className={`status-badge ${job.status}`}>
+                            {job.status}
+                          </span>
+                        </td>
+                        <td className="job-actions">
+                          <button
+                            className="remove-job-btn"
+                            onClick={() => removeFromQueue(job.id)}
+                            title="Remove from queue"
+                            disabled={job.status === "processing"}
+                            style={{ opacity: job.status === "processing" ? 0.3 : 1 }}
+                          >
+                            ×
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="modal-footer">
+              <button
+                className="open-btn ghost"
+                style={{ marginRight: "auto" }}
+                onClick={clearCompleted}
+                disabled={!queue.some(j => j.status === 'completed' || j.status === 'failed')}
+              >
+                Clear Done / Failed
+              </button>
+              <button
+                className="open-btn"
+                onClick={() => setShowQueueModal(false)}
+              >
+                Close
               </button>
             </div>
           </div>

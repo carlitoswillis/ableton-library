@@ -5,8 +5,8 @@ Welcome to the roadmap! This document is designed for quick human reading to see
 ---
 
 ## 🚦 Current Status
-* **Phase**: **Milestone 3 — Previews** (Active)
-* **Status**: Core extraction, SQLite search index, and in-app scanning with live progress reporting are **completed and verified**. Previews discovery, name-matching, peak extraction, and the playback UI are fully built and awaiting final host testing.
+* **Phase**: **Milestone 4 — Export Worker** (Completed & Integrated)
+* **Status**: SQLite database schema migrations, dynamic Live application resolution, background worker loops, macOS AppleScript automation script (`tools/export_set.py`), and a beautiful real-time React Render Queue dashboard/modal are **fully implemented and verified**.
 
 ---
 
@@ -20,7 +20,7 @@ Welcome to the roadmap! This document is designed for quick human reading to see
 * **Goal**: Store sets, tracks, plugins, and samples in a local SQLite database with FTS5 search.
 * **Status**: **Complete & Verified** (Incremental indexing via size/mtime checks, prune deleted sets, ranking search by name significance).
 
-### ⚡ Milestone 3: Previews (`previews` & `app`) — *In Progress*
+### ⚡ Milestone 3: Previews (`previews` & `app`) — *Complete*
 * **Goal**: Scan folders for renders, match them to sets by name, extract waveform peaks, and play them in the UI.
 * **Completed**:
   * **Render discovery & matching**: Loose audio file discovery with stopwords and `vN` stripping, optimized directory walking, and Jaccard name matching.
@@ -32,9 +32,11 @@ Welcome to the roadmap! This document is designed for quick human reading to see
   * 🔄 **`roots` table & rescan**: Remember all folders that have been scanned in a database table so they can be refreshed at the click of a button.
   * ☁️ **iCloud `evicted` sample state**: Differentiate between truly missing samples and cloud-only placeholder `.icloud` files.
 
-### 🔮 Milestone 4: Export Worker (Flagship Automation)
+### ✅ Milestone 4: Export Worker (Flagship Automation) — *Complete*
 * **Goal**: Automatically render previews for sets that don't have existing renders.
-* **Design**: A background queue worker that launches a secondary Ableton Live install, uses macOS UI scripting to open the set, triggers `File -> Export Audio`, handles standard dialog boxes, and attaches the resulting bounce as a preview.
+* **Status**: **Complete & Integrated** (Python GUI automation script `tools/export_set.py` integrated into a Rust background worker. Frontend Render Queue UI provides start/pause toggles, status feedback, dynamic header updates, and real-time refresh).
+* **Up Next (Backlog)**:
+  * 🔄 **Overwrite confirmation**: Handle overwrite/replace confirmation dialogs in UI scripting if pre-deletion fails or if other file conflicts occur.
 
 ---
 

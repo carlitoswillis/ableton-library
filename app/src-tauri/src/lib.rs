@@ -2,6 +2,7 @@
 //! All query logic lives in indexer — the CLI and this app are equals.
 
 use std::path::PathBuf;
+use tauri::Manager;
 
 use serde_json::Value;
 
@@ -90,6 +91,206 @@ async fn cancel_scan(state: State<'_, ScanState>) -> Result<(), String> {
     Ok(())
 }
 
+struct ExportState {
+    active: Arc<AtomicBool>,
+}
+
+impl Default for ExportState {
+    fn default() -> Self {
+        Self {
+            active: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn add_to_export_queue(set_id: i64) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::add_export_job(&conn, set_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn get_export_queue() -> Result<Vec<indexer::ExportJobInfo>, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::get_export_queue(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn remove_from_export_queue(job_id: i64) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::remove_export_job(&conn, job_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn clear_completed_jobs() -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::clear_completed_export_jobs(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn toggle_export_queue(state: State<'_, ExportState>, active: bool) -> Result<(), String> {
+    state.active.store(active, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn get_export_queue_active(state: State<'_, ExportState>) -> Result<bool, String> {
+    Ok(state.active.load(Ordering::Relaxed))
+}
+
+async fn export_worker_loop(app: tauri::AppHandle) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let active = {
+            if let Some(state) = app.try_state::<ExportState>() {
+                state.active.load(Ordering::Relaxed)
+            } else {
+                false
+            }
+        };
+
+        if !active {
+            continue;
+        }
+
+        let db = match db_path() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let conn = match indexer::open(&db) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let job = match indexer::get_pending_export_job(&conn) {
+            Ok(Some(j)) => j,
+            _ => continue,
+        };
+
+        let (job_id, set_id, als_path) = job;
+        let set_stem = std::path::Path::new(&als_path)
+            .file_stem()
+            .map(|x| x.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        // 1. Mark as processing
+        if let Err(_) = indexer::update_export_job_status(&conn, job_id, "processing", None) {
+            continue;
+        }
+        let _ = app.emit("export-queue-updated", ());
+
+        // 2. Perform the export (saving inside the existing project folder next to the .als file)
+        let als_parent = std::path::Path::new(&als_path).parent().unwrap().to_path_buf();
+
+        let mut script_path = std::env::current_dir()
+            .unwrap_or_default()
+            .join("tools")
+            .join("export_set.py");
+
+        if !script_path.exists() {
+            if let Ok(exe_path) = std::env::current_exe() {
+                if let Some(parent) = exe_path.parent() {
+                    script_path = parent.join("tools").join("export_set.py");
+                    if !script_path.exists() {
+                        if let Some(grandparent) = parent.parent() {
+                            if let Some(grandgrandparent) = grandparent.parent() {
+                                script_path = grandgrandparent.join("tools").join("export_set.py");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut live_app_path = std::path::PathBuf::from("/Applications/Ableton Live 11 Suite.app");
+        if !live_app_path.exists() {
+            if let Ok(entries) = std::fs::read_dir("/Applications") {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if name.contains("Ableton Live") && name.ends_with(".app") {
+                        live_app_path = path;
+                        break;
+                    }
+                }
+            }
+        }
+        let live_app = live_app_path.to_string_lossy().into_owned();
+        let output_dir_str = als_parent.to_string_lossy().into_owned();
+
+        // Run process
+        let status = tauri::async_runtime::spawn_blocking(move || {
+            std::process::Command::new("python3")
+                .arg(&script_path)
+                .arg("--set-path")
+                .arg(&als_path)
+                .arg("--output-dir")
+                .arg(&output_dir_str)
+                .arg("--live-app")
+                .arg(live_app)
+                .output()
+        })
+        .await;
+
+        let mut error_msg = None;
+        let mut success = false;
+
+        match status {
+            Ok(Ok(output)) if output.status.success() => {
+                success = true;
+            }
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                error_msg = Some(format!("Script failed: {stderr}"));
+            }
+            Ok(Err(e)) => {
+                error_msg = Some(format!("Failed to execute python3 script: {e}"));
+            }
+            Err(e) => {
+                error_msg = Some(format!("Thread panic during command execution: {e}"));
+            }
+        }
+
+        if success {
+            let audio_file = als_parent.join(format!("{}.wav", set_stem));
+
+            let db_path_clone = db.clone();
+            let ingest_result = tauri::async_runtime::spawn_blocking(move || {
+                let conn = indexer::open(&db_path_clone)?;
+                let meta = std::fs::metadata(&audio_file)?;
+                let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
+                let pk = previews::peaks::extract(&audio_file)?;
+                let row = indexer::PreviewRow {
+                    set_id: Some(set_id),
+                    project_id: Some(indexer::set_project_id(&conn, set_id)?),
+                    audio_path: std::path::absolute(&audio_file)?.to_string_lossy().into_owned(),
+                    source: "worker".into(),
+                    confidence: 1.0,
+                    mtime: now,
+                    size: meta.len(),
+                    duration: Some(pk.duration_secs),
+                    peaks_json: Some(previews::peaks::to_json(&pk.peaks)),
+                };
+                indexer::upsert_preview(&conn, &row)?;
+                indexer::update_export_job_status(&conn, job_id, "completed", None)?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .await;
+
+            if let Err(e) = ingest_result {
+                let err_str = e.to_string();
+                let _ = indexer::update_export_job_status(&conn, job_id, "failed", Some(&err_str));
+            }
+        } else {
+            let err_str = error_msg.unwrap_or_else(|| "Unknown export error".into());
+            let _ = indexer::update_export_job_status(&conn, job_id, "failed", Some(&err_str));
+        }
+
+        let _ = app.emit("export-queue-updated", ());
+    }
+}
+
 /// Index a folder of Ableton projects (incremental; harvests in-folder
 /// renders as previews). Same engine as `ableton-scan scan`.
 ///
@@ -151,9 +352,19 @@ async fn open_set(set_id: i64, reveal: bool) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(ScanState::default())
+        .manage(ExportState::default())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                export_worker_loop(app_handle).await;
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
-            search, inspect, stats, open_set, preview, scan_folder, cancel_scan
+            search, inspect, stats, open_set, preview, scan_folder, cancel_scan,
+            add_to_export_queue, get_export_queue, remove_from_export_queue,
+            clear_completed_jobs, toggle_export_queue, get_export_queue_active
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

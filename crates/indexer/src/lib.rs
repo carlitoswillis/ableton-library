@@ -102,9 +102,23 @@ CREATE INDEX IF NOT EXISTS idx_previews_proj ON previews(project_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_previews_set_path ON previews(set_id, audio_path);
 "#;
 
+/// v3: export automation queue.
+const SCHEMA_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS export_jobs (
+    id           INTEGER PRIMARY KEY,
+    set_id       INTEGER NOT NULL UNIQUE REFERENCES sets(id) ON DELETE CASCADE,
+    status       TEXT NOT NULL,              -- pending | processing | completed | failed
+    error        TEXT,
+    created_at   TEXT NOT NULL,
+    started_at   TEXT,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_export_jobs_status ON export_jobs(status);
+"#;
+
 /// Current schema version. Migrations upgrade older catalogs in place;
 /// catalogs NEWER than this build are refused.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// Open (creating if needed) the index database, migrating if needed.
 pub fn open(db_path: &Path) -> Result<Connection> {
@@ -128,6 +142,7 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     if version == 0 {
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(SCHEMA_V2)?;
+        conn.execute_batch(SCHEMA_V3)?;
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         return Ok(conn);
     }
@@ -135,11 +150,16 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     if version == 1 {
         conn.execute_batch(SCHEMA_V2)?;
         version = 2;
+    }
+    if version == 2 {
+        conn.execute_batch(SCHEMA_V3)?;
+        version = 3;
         conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
     }
     debug_assert_eq!(version, SCHEMA_VERSION);
     conn.execute_batch(SCHEMA)?; // idempotent (IF NOT EXISTS)
     conn.execute_batch(SCHEMA_V2)?;
+    conn.execute_batch(SCHEMA_V3)?;
     Ok(conn)
 }
 
@@ -487,6 +507,7 @@ pub struct Stats {
     pub samples: i64,
     pub backups: i64,
     pub previews: i64,
+    pub export_jobs: i64,
 }
 
 /// Resolve a set reference: numeric id, exact als_path, or path fragment.
@@ -640,5 +661,119 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
         samples: count("SELECT COUNT(*) FROM samples")?,
         backups: count("SELECT COUNT(*) FROM backups")?,
         previews: count("SELECT COUNT(*) FROM previews")?,
+        export_jobs: count("SELECT COUNT(*) FROM export_jobs")?,
     })
+}
+
+#[derive(serde::Serialize)]
+pub struct ExportJobInfo {
+    pub id: i64,
+    pub set_id: i64,
+    pub als_path: String,
+    pub project_name: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+pub fn add_export_job(conn: &Connection, set_id: i64) -> Result<()> {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
+    conn.execute(
+        "INSERT INTO export_jobs (set_id, status, created_at)
+         VALUES (?1, 'pending', ?2)
+         ON CONFLICT(set_id) DO UPDATE SET
+            status = 'pending',
+            created_at = ?2,
+            started_at = NULL,
+            completed_at = NULL,
+            error = NULL",
+        params![set_id, now],
+    )?;
+    Ok(())
+}
+
+pub fn get_pending_export_job(conn: &Connection) -> Result<Option<(i64, i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT j.id, j.set_id, s.als_path
+         FROM export_jobs j
+         JOIN sets s ON s.id = j.set_id
+         WHERE j.status = 'pending'
+         ORDER BY j.id ASC LIMIT 1",
+    )?;
+    let row = stmt.query_row([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?;
+    Ok(row)
+}
+
+pub fn update_export_job_status(
+    conn: &Connection,
+    job_id: i64,
+    status: &str,
+    error: Option<&str>,
+) -> Result<()> {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
+    match status {
+        "processing" => {
+            conn.execute(
+                "UPDATE export_jobs SET status = ?1, started_at = ?2, error = NULL WHERE id = ?3",
+                params![status, now, job_id],
+            )?;
+        }
+        "completed" | "failed" => {
+            conn.execute(
+                "UPDATE export_jobs SET status = ?1, completed_at = ?2, error = ?3 WHERE id = ?4",
+                params![status, now, error, job_id],
+            )?;
+        }
+        _ => {
+            conn.execute(
+                "UPDATE export_jobs SET status = ?1, error = ?2 WHERE id = ?3",
+                params![status, error, job_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub fn get_export_queue(conn: &Connection) -> Result<Vec<ExportJobInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT j.id, j.set_id, s.als_path, p.name, j.status, j.error, j.created_at, j.started_at, j.completed_at
+         FROM export_jobs j
+         JOIN sets s ON s.id = j.set_id
+         JOIN projects p ON p.id = s.project_id
+         ORDER BY j.id DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ExportJobInfo {
+            id: r.get(0)?,
+            set_id: r.get(1)?,
+            als_path: r.get(2)?,
+            project_name: r.get(3)?,
+            status: r.get(4)?,
+            error: r.get(5)?,
+            created_at: r.get(6)?,
+            started_at: r.get(7)?,
+            completed_at: r.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn clear_completed_export_jobs(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM export_jobs WHERE status IN ('completed', 'failed')",
+        [],
+    )?;
+    Ok(())
+}
+
+pub fn remove_export_job(conn: &Connection, job_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM export_jobs WHERE id = ?1", params![job_id])?;
+    Ok(())
 }

@@ -127,14 +127,18 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "als-core",
+ "anyhow",
+ "chrono",
  "dirs 5.0.1",
  "indexer",
  "ops",
+ "previews",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tokio",
 ]
 
 [[package]]
@@ -1693,6 +1697,7 @@ version = "0.1.0"
 dependencies = [
  "als-core",
  "anyhow",
+ "chrono",
  "rusqlite",
  "serde",
  "serde_json",
