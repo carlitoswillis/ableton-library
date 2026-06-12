@@ -898,6 +898,29 @@ pub fn add_export_job(conn: &Connection, set_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Queue many sets at once (bulk export). Each set is (re)queued as pending,
+/// EXCEPT sets whose job is currently `processing` — an active render is
+/// never clobbered. Returns how many jobs were actually (re)queued.
+pub fn add_export_jobs_bulk(conn: &Connection, set_ids: &[i64]) -> Result<usize> {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
+    let mut stmt = conn.prepare(
+        "INSERT INTO export_jobs (set_id, status, created_at)
+         VALUES (?1, 'pending', ?2)
+         ON CONFLICT(set_id) DO UPDATE SET
+            status = 'pending',
+            created_at = ?2,
+            started_at = NULL,
+            completed_at = NULL,
+            error = NULL
+         WHERE export_jobs.status != 'processing'",
+    )?;
+    let mut queued = 0usize;
+    for set_id in set_ids {
+        queued += stmt.execute(params![set_id, now])?;
+    }
+    Ok(queued)
+}
+
 pub fn get_pending_export_job(conn: &Connection) -> Result<Option<(i64, i64, String)>> {
     let mut stmt = conn.prepare(
         "SELECT j.id, j.set_id, s.als_path

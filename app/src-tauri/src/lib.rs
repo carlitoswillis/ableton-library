@@ -126,6 +126,14 @@ async fn add_to_export_queue(set_id: i64) -> Result<(), String> {
     indexer::add_export_job(&conn, set_id).map_err(|e| e.to_string())
 }
 
+/// Bulk export: queue renders for many sets at once (multi-select in the UI).
+/// Returns how many were actually queued (active renders are skipped).
+#[tauri::command(rename_all = "snake_case")]
+async fn add_to_export_queue_bulk(set_ids: Vec<i64>) -> Result<usize, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::add_export_jobs_bulk(&conn, &set_ids).map_err(|e| e.to_string())
+}
+
 #[tauri::command(rename_all = "snake_case")]
 async fn get_export_queue() -> Result<Vec<indexer::ExportJobInfo>, String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
@@ -589,7 +597,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             search, inspect, stats, open_set, preview, scan_folder, cancel_scan, bulk_preview_scan,
-            add_to_export_queue, get_export_queue, remove_from_export_queue,
+            add_to_export_queue, add_to_export_queue_bulk, get_export_queue, remove_from_export_queue,
             clear_completed_jobs, toggle_export_queue, get_export_queue_active,
             retry_failed_jobs, remove_preview,
             add_watch_folder, remove_watch_folder, list_watch_folders,

@@ -116,6 +116,7 @@ export default function App() {
   });
   const logConsoleRef = useRef<HTMLDivElement | null>(null);
 
+  const [selected, setSelected] = useState<Set<number>>(new Set());
   const [queue, setQueue] = useState<ExportJob[]>([]);
   const [queueActive, setQueueActive] = useState(false);
   const [showQueueModal, setShowQueueModal] = useState(false);
@@ -188,6 +189,73 @@ export default function App() {
     }
   }, []);
 
+
+  // Keep the selection in sync with visible results: ids that fall out of
+  // the current search are dropped so "Queue N" never exports hidden rows.
+  useEffect(() => {
+    setSelected((prev) => {
+      const visible = new Set(hits.map((h) => h.set_id));
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [hits]);
+
+  // Anchor for shift-click range selection (last row whose checkbox was clicked).
+  const selectAnchor = useRef<number | null>(null);
+
+  const handleRowCheck = (setId: number, shift: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (shift && selectAnchor.current !== null && selectAnchor.current !== setId) {
+        const ids = hits.map((h) => h.set_id);
+        const a = ids.indexOf(selectAnchor.current);
+        const b = ids.indexOf(setId);
+        if (a !== -1 && b !== -1) {
+          // Whether the range selects or deselects follows the clicked row.
+          const selecting = !prev.has(setId);
+          const [lo, hi] = a < b ? [a, b] : [b, a];
+          for (let i = lo; i <= hi; i++) {
+            if (selecting) {
+              next.add(ids[i]);
+            } else {
+              next.delete(ids[i]);
+            }
+          }
+          selectAnchor.current = setId;
+          return next;
+        }
+      }
+      if (next.has(setId)) {
+        next.delete(setId);
+      } else {
+        next.add(setId);
+      }
+      selectAnchor.current = setId;
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelected((prev) =>
+      prev.size === hits.length ? new Set() : new Set(hits.map((h) => h.set_id))
+    );
+  };
+
+  const queueSelected = async () => {
+    if (selected.size === 0) return;
+    try {
+      setError(null);
+      const n = await invoke<number>("add_to_export_queue_bulk", {
+        set_ids: Array.from(selected),
+      });
+      setSelected(new Set());
+      refreshQueue();
+      refreshStats();
+      setError(`Note: ${n} render${n === 1 ? "" : "s"} queued.`);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   const addToQueue = async (setId: number) => {
     try {
@@ -848,14 +916,66 @@ export default function App() {
               </p>
             </div>
           )}
+          {hits.length > 0 && (
+            <div className="select-bar">
+              <label className="select-all" title="Select all results">
+                <input
+                  type="checkbox"
+                  checked={selected.size === hits.length}
+                  ref={(el) => {
+                    if (el) el.indeterminate = selected.size > 0 && selected.size < hits.length;
+                  }}
+                  onChange={toggleSelectAll}
+                />
+                {selected.size > 0 ? `${selected.size} selected` : "Select all"}
+              </label>
+              {selected.size > 0 && (
+                <>
+                  <button
+                    className="play-btn"
+                    style={{ borderColor: "var(--accent)", color: "var(--accent)" }}
+                    onClick={queueSelected}
+                    title="Queue audio preview renders for all selected sets"
+                  >
+                    Queue {selected.size} render{selected.size === 1 ? "" : "s"}
+                  </button>
+                  <button className="play-btn" onClick={() => setSelected(new Set())}>
+                    Clear
+                  </button>
+                </>
+              )}
+            </div>
+          )}
           <table>
             <tbody>
               {hits.map((h) => (
                 <tr
                   key={h.set_id}
-                  className={detail?.set_id === h.set_id ? "selected" : ""}
-                  onClick={() => openDetail(h.set_id)}
+                  className={`${detail?.set_id === h.set_id ? "selected" : ""}${selected.has(h.set_id) ? " checked" : ""}`}
+                  onClick={(e) => {
+                    // Finder-style: cmd-click toggles selection, shift-click
+                    // extends the range from the last clicked row; plain
+                    // click opens the detail pane.
+                    if (e.metaKey || e.ctrlKey) {
+                      handleRowCheck(h.set_id, false);
+                    } else if (e.shiftKey) {
+                      handleRowCheck(h.set_id, true);
+                    } else {
+                      openDetail(h.set_id);
+                    }
+                  }}
                 >
+                  <td className="sel" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selected.has(h.set_id)}
+                      onChange={() => {}}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRowCheck(h.set_id, e.shiftKey);
+                      }}
+                    />
+                  </td>
                   <td className="proj">{h.project}</td>
                   <td className="set">{fileName(h.als_path)}</td>
                   <td className="num">{formatTempo(h.tempo, h.tempos)} bpm</td>
