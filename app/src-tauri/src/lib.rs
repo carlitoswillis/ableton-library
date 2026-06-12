@@ -26,6 +26,7 @@ async fn search(
     sort_by: Option<String>,
     date_modified: Option<String>,
     date_scanned: Option<String>,
+    has_preview: Option<String>,
 ) -> Result<Vec<indexer::SearchHit>, String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
     indexer::search(
@@ -38,6 +39,7 @@ async fn search(
             sort_by: none_if_blank(sort_by),
             date_modified: none_if_blank(date_modified),
             date_scanned: none_if_blank(date_scanned),
+            has_preview: none_if_blank(has_preview),
         },
     )
     .map_err(|e| e.to_string())

@@ -94,6 +94,7 @@ export default function App() {
   const [sortBy, setSortBy] = useState("modified");
   const [dateModified, setDateModified] = useState("");
   const [dateScanned, setDateScanned] = useState("");
+  const [hasPreviewFilter, setHasPreviewFilter] = useState("all");
   const [scanning, setScanning] = useState(false);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
   const [scanLogs, setScanLogs] = useState<string[]>([]);
@@ -126,12 +127,13 @@ export default function App() {
         sort_by: sortBy || null,
         date_modified: dateModified || null,
         date_scanned: dateScanned || null,
+        has_preview: hasPreviewFilter || null,
       });
       setHits(res);
     } catch (e) {
       setError(String(e));
     }
-  }, [text, minBpm, maxBpm, plugin, sortBy, dateModified, dateScanned]);
+  }, [text, minBpm, maxBpm, plugin, sortBy, dateModified, dateScanned, hasPreviewFilter]);
 
   // Debounced live search.
   useEffect(() => {
@@ -734,6 +736,16 @@ export default function App() {
           <option value="yesterday">Scanned Yesterday</option>
           <option value="week">Scanned This Week</option>
           <option value="month">Scanned This Month</option>
+        </select>
+        <select
+          className="sort-select"
+          value={hasPreviewFilter}
+          onChange={(e) => setHasPreviewFilter(e.target.value)}
+          style={{ width: "135px" }}
+        >
+          <option value="all">All Previews</option>
+          <option value="yes">Has Preview</option>
+          <option value="no">No Preview</option>
         </select>
       </div>
 

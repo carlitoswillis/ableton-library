@@ -251,6 +251,7 @@ fn cmd_search(
             sort_by: None,
             date_modified: None,
             date_scanned: None,
+            has_preview: None,
         },
     )?;
     for h in &hits {

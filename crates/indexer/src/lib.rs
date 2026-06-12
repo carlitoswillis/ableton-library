@@ -514,6 +514,7 @@ pub struct SearchOpts {
     pub sort_by: Option<String>,
     pub date_modified: Option<String>,
     pub date_scanned: Option<String>,
+    pub has_preview: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -576,6 +577,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
                                             AND d.name LIKE '%' || ?4 || '%'))
                AND (?5 IS NULL OR s.mtime >= ?5)
                AND (?6 IS NULL OR p.last_scanned >= ?6)
+               AND (?7 IS NULL OR ?7 = 'all' OR (?7 = 'yes' AND pv.audio_path IS NOT NULL) OR (?7 = 'no' AND pv.audio_path IS NULL))
              ORDER BY {}",
             order_by
         )
@@ -594,13 +596,22 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
                                             AND d.name LIKE '%' || ?4 || '%'))
                AND (?5 IS NULL OR s.mtime >= ?5)
                AND (?6 IS NULL OR p.last_scanned >= ?6)
+               AND (?7 IS NULL OR ?7 = 'all' OR (?7 = 'yes' AND pv.audio_path IS NOT NULL) OR (?7 = 'no' AND pv.audio_path IS NULL))
              ORDER BY {}",
             order_by
         )
     };
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        params![o.text, o.min_bpm, o.max_bpm, o.plugin, modified_bound_str, scanned_bound_str],
+        params![
+            o.text,
+            o.min_bpm,
+            o.max_bpm,
+            o.plugin,
+            modified_bound_str,
+            scanned_bound_str,
+            o.has_preview,
+        ],
         |r| {
             let preview_path: Option<String> = r.get(6)?;
             Ok(SearchHit {
