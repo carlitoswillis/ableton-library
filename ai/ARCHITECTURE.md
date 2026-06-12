@@ -27,7 +27,7 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
 - **Version tolerance**: No Ableton SDK (user on Live 11; SDK is Live 12 Suite beta only). Parse leniently across Live versions, backward (9/10/11) and forward (12+): ignore unknown elements, tolerate missing ones, record Creator/version per set, and emit per-field extraction warnings instead of failing the whole file.
 - **Extracts**: Live version, tempo/time sig, tracks (type/name/color), clip names, device/plugin names, sample file references.
 - **Output**: Normalized ProjectSnapshot JSON per set.
-- **Concurrency**: `scan_library` in the `ops` crate parallelizes `.als` decompression + XML parsing across all CPU cores via `std::thread::scope`. Worker threads parse independently; results funnel to the main thread for sequential SQLite writes (SQLite single-writer constraint).
+- **Concurrency**: `scan_library` in the `ops` crate parallelizes `.als` decompression + XML parsing across all CPU cores via `std::thread::scope`. Worker threads parse independently; results funnel to the main thread for sequential SQLite writes (SQLite single-writer constraint). Preview harvesting is **interleaved** — each project's in-folder renders are harvested immediately after all its `.als` files are ingested (per-project pending counter), rather than in a separate bulk pass. `known_samples` (sample cross-check) is loaded from DB at scan start and grown incrementally from each ingested snapshot's sample paths.
 
 ### 2. Metadata & Indexing Service — `indexer` (Rust + SQLite)
 - **Decision**: SQLite with FTS5 (over names) for search.
@@ -50,7 +50,13 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
 - **Views**: Library View (Search/Filters) ✓, Set Detail pane ✓; Player pending Milestone 3.
 
 ## Data Flow
-Filesystem (.als) -> als-core (streaming parse) -> indexer (SQLite) -> Tauri commands -> React UI
+```
+Filesystem (.als) -> als-core (streaming parse, multi-threaded)
+                  -> indexer (SQLite ingest, sequential)
+                  -> harvest_folder_renders (immediate, per-project)
+                  -> Tauri commands -> React UI
+```
+Key design: scan + harvest are interleaved per-project, not batched. The user sees `indexed -> preview -> indexed -> preview` in the logs.
 
 ## Known Naming Inconsistencies (backlog)
 The codebase has grown organically and several naming choices are vague or inconsistent. These should be addressed in a dedicated rename pass:

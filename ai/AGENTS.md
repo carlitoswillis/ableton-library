@@ -22,6 +22,7 @@ PURPOSE: This is the authoritative rulebook for AI assistants. It defines the 'h
 - **Compact Context**: Keep context files task-scoped and minimal.
 - **Async + spawn_blocking**: ALL Tauri commands must be `async`. Any command touching disk/db goes in `spawn_blocking`. (Learned from beach-ball incident — sync commands run on main thread.)
 - **Multi-threading pattern**: CPU-bound batch work (`.als` parsing, audio peak extraction) uses `std::thread::scope` with worker threads funneling results to main thread for sequential SQLite writes.
+- **Interleave scan + harvest**: When scanning a library, preview harvesting happens per-project immediately after that project's sets are ingested — never as a separate bulk pass. `known_samples` (sample cross-check) is built incrementally, not queried in bulk after commit.
 - **Export worker**: Automated Live export uses macOS UI automation (`tools/export_set.py`). Serialize one render at a time; treat Live as flaky (timeouts, retry once, mark failed rather than wedging queue).
 
 ## How to Navigate This Workspace (Priority Flow)

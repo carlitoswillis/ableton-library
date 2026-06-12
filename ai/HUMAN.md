@@ -28,6 +28,7 @@ Welcome to the roadmap! This document is designed for quick human reading to see
   * **Player UI**: Interactive bottom player bar with canvas waveform, click-to-seek, and play/pause controls.
   * **Tauri scan progress**: Live-scrolling logs terminal inside the app, stats counters, and full scan cancel/background minimize support.
   * **Multi-threaded scanning**: Library scanning (`.als` decompression + XML parsing), bulk preview scan, and in-folder preview harvest all parallelized via `std::thread::scope` across all CPU cores (~6-8x speedup).
+  * **Interleaved scan + harvest**: Instead of indexing all projects then previewing all projects in two separate passes, each project's previews are harvested immediately after its sets are indexed. The user sees `indexed → preview → indexed → preview` in the scan logs. Sample cross-check (`known_samples`) is built incrementally so it's always accurate.
   * **BPM parsing & duplicate render filtering**: Enhanced BPM extraction and smarter filtering of duplicate render matches.
 * **Up Next (Backlog)**:
   * 🔀 **Previews list & primary switcher**: Show all matched/manual previews for a set in the detail pane, play them, and choose which one is the "Primary" preview.
