@@ -538,14 +538,24 @@ export default function App() {
     );
   };
 
+  // "Select all" = the best candidate per preview-LESS set. Projects that
+  // already have a preview are only ever shown — never picked automatically;
+  // linking those requires checking them individually.
+  const selectableSuggestionKeys = () => {
+    const best = new Map<number, Suggestion>();
+    for (const s of suggestions) {
+      if (s.has_preview) continue;
+      const cur = best.get(s.set_id);
+      if (!cur || s.confidence > cur.confidence) best.set(s.set_id, s);
+    }
+    return Array.from(best.values()).map((s) => `${s.set_id}:${s.audio_path}`);
+  };
+
   const toggleSelectAllSuggestions = () => {
-    setSelectedSuggestions((prev) => {
-      if (prev.length === suggestions.length) {
-        return [];
-      } else {
-        return suggestions.map((s) => `${s.set_id}:${s.audio_path}`);
-      }
-    });
+    const all = selectableSuggestionKeys();
+    setSelectedSuggestions((prev) =>
+      all.length > 0 && all.every((k) => prev.includes(k)) ? [] : all
+    );
   };
 
   // Bulk link runs as a background job exactly like scan_folder /
@@ -1497,8 +1507,12 @@ export default function App() {
                         <th style={{ width: "30px", textAlign: "center" }}>
                           <input
                             type="checkbox"
-                            checked={suggestions.length > 0 && selectedSuggestions.length === suggestions.length}
+                            checked={(() => {
+                              const all = selectableSuggestionKeys();
+                              return all.length > 0 && all.every((k) => selectedSuggestions.includes(k));
+                            })()}
                             onChange={toggleSelectAllSuggestions}
+                            title="Select the best match for every set that has no preview yet"
                           />
                         </th>
                         <th colSpan={2}>Set / Matching Bounces</th>
