@@ -410,8 +410,49 @@ async fn ignore_watch_suggestion(set_id: i64, audio_path: String) -> Result<(), 
 #[tauri::command(rename_all = "snake_case")]
 async fn link_watch_suggestion(set_id: i64, audio_path: String) -> Result<(), String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
-    ops::attach(&conn, set_id, std::path::Path::new(&audio_path)).map_err(|e| e.to_string())
+    
+    // 1. Get als_path of the set
+    let als_path = indexer::set_path(&conn, set_id).map_err(|e| e.to_string())?;
+    let als_path = std::path::Path::new(&als_path);
+    
+    let set_stem = als_path
+        .file_stem()
+        .map(|x| x.to_string_lossy().into_owned())
+        .ok_or_else(|| "Invalid set path".to_string())?;
+        
+    let project_dir = als_path
+        .parent()
+        .ok_or_else(|| "No parent directory for set path".to_string())?;
+
+    // 2. Determine target path (retaining extension of source audio file)
+    let src_path = std::path::Path::new(&audio_path);
+    if !src_path.exists() {
+        return Err(format!("Source audio file does not exist: {}", audio_path));
+    }
+    
+    let ext = src_path
+        .extension()
+        .map(|x| x.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "wav".to_string());
+        
+    let target_path = project_dir.join(format!("{}.{}", set_stem, ext));
+
+    // 3. Move the file from src_path to target_path (handling cross-device boundaries)
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create project subdirectories: {e}"))?;
+    }
+    
+    if std::fs::rename(src_path, &target_path).is_err() {
+        // Fall back to copy + delete if rename fails
+        std::fs::copy(src_path, &target_path)
+            .map_err(|e| format!("Failed to copy audio file to project: {e}"))?;
+        let _ = std::fs::remove_file(src_path);
+    }
+
+    // 4. Attach the new target path to the set
+    ops::attach(&conn, set_id, &target_path).map_err(|e| e.to_string())
 }
+
 
 pub fn run() {
     tauri::Builder::default()
