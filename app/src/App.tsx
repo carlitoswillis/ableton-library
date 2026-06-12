@@ -203,36 +203,40 @@ export default function App() {
   // Anchor for shift-click range selection (last row whose checkbox was clicked).
   const selectAnchor = useRef<number | null>(null);
 
+  // NOTE: all logic lives OUTSIDE the setSelected updater on purpose —
+  // StrictMode double-invokes updaters, and mutating the anchor ref inside
+  // one broke shift-ranges (second invocation saw the anchor already moved
+  // and fell back to a single toggle).
   const handleRowCheck = (setId: number, shift: boolean) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (shift && selectAnchor.current !== null && selectAnchor.current !== setId) {
-        const ids = hits.map((h) => h.set_id);
-        const a = ids.indexOf(selectAnchor.current);
-        const b = ids.indexOf(setId);
-        if (a !== -1 && b !== -1) {
-          // Whether the range selects or deselects follows the clicked row.
-          const selecting = !prev.has(setId);
-          const [lo, hi] = a < b ? [a, b] : [b, a];
-          for (let i = lo; i <= hi; i++) {
-            if (selecting) {
-              next.add(ids[i]);
-            } else {
-              next.delete(ids[i]);
-            }
+    const next = new Set(selected);
+    let ranged = false;
+    if (shift && selectAnchor.current !== null && selectAnchor.current !== setId) {
+      const ids = hits.map((h) => h.set_id);
+      const a = ids.indexOf(selectAnchor.current);
+      const b = ids.indexOf(setId);
+      if (a !== -1 && b !== -1) {
+        // Whether the range selects or deselects follows the clicked row.
+        const selecting = !selected.has(setId);
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        for (let i = lo; i <= hi; i++) {
+          if (selecting) {
+            next.add(ids[i]);
+          } else {
+            next.delete(ids[i]);
           }
-          selectAnchor.current = setId;
-          return next;
         }
+        ranged = true;
       }
+    }
+    if (!ranged) {
       if (next.has(setId)) {
         next.delete(setId);
       } else {
         next.add(setId);
       }
-      selectAnchor.current = setId;
-      return next;
-    });
+    }
+    selectAnchor.current = setId;
+    setSelected(next);
   };
 
   const toggleSelectAll = () => {

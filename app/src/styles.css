@@ -155,8 +155,10 @@ header h1 {
   background: rgba(255, 180, 84, 0.13);
 }
 
-/* Shift-click range selection shouldn't highlight text */
-.results tr {
+/* Shift/cmd-click selects rows, never text. WKWebView (Tauri on macOS)
+   requires the -webkit- prefix. */
+.results table {
+  -webkit-user-select: none;
   user-select: none;
 }
 
