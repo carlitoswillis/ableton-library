@@ -1,5 +1,5 @@
 # AI Context Bundle
-Generated: Fri Jun 12 00:02:23 UTC 2026
+Generated: Fri Jun 12 00:29:35 UTC 2026
 
 ## ⚠️ Agent Navigation Guide
 1. Start with the **Current State** below to understand the focus.
@@ -55,9 +55,11 @@ Ableton Library is a metadata and preview indexing system for Ableton projects, 
 
 ### Repository Layout (Cargo workspace)
 ```
-crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot (serde)  [BUILT, verified vs oracle]
-crates/cli/        # bin: `ableton-scan` (clap + walkdir)  [BUILT, verified vs oracle]
-crates/indexer/    # lib: SQLite (rusqlite + FTS5), incremental scan (mtime+hash)  [NEXT]
+crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot; discovery  [BUILT, verified]
+crates/previews/   # lib: render discovery, name matching, symphonia peaks  [BUILT]
+crates/indexer/    # lib: SQLite (rusqlite + FTS5) storage; pure, no workflow logic  [BUILT, verified]
+crates/ops/        # lib: workflows (scan_library, hunt_renders, attach) shared by cli + app  [BUILT]
+crates/cli/        # bin: `ableton-scan` — thin wrappers over ops/indexer  [BUILT, verified]
 tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
 app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: symphonia for waveform peaks
 ```
@@ -110,7 +112,13 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 - [x] crates/previews: render hunt (audio exts, >=1MB, skips Samples/Backup/Project Info dirs), normalizer (stopwords/vN/bpm/bracketed chunks), scorer (exact 1.0 > word-boundary prefix 0.85 > token Jaccard; project-name fallback -> single-set x0.9 else project-level x0.5), symphonia peak extraction (<=1500 bins, coarse-then-downsample, JSON).
 - [x] CLI: `previews <roots...> [--threshold 0.6] [--verbose]` (freshness-checked, decode only matches) + `attach <set> <audio>` (manual, confidence 1.0). Primary = highest confidence then newest.
 - [x] App: `preview` command; asset protocol enabled (scope **, tauri feature protocol-asset — user added the cargo feature); bottom PlayerBar (canvas waveform, click-seek, match-confidence shown when <85%); ▶ on rows with previews.
-- [ ] **NEXT (on user's Mac)**: cargo build; `ableton-scan previews <some bounce folder>` against indexed sets; check match quality (then tune threshold/stopwords); run app, play something.
+- **Matcher revision (user feedback)**: bpm/key/"(prod. x)" are often PART of project names (user's old naming habit) — KEEP them as distinguishing signal; normalize form instead ("145bpm" -> "145 bpm"); strip only [bracketed timestamps], stopwords (final/master/...), vN. Tests cover the disambiguation case.
+- [x] `reset` subcommand (deletes db + WAL/SHM; dry-run unless --yes).
+- [x] Sample-safety (user concern): discovery skips Samples/Backup/Ableton Project Info dirs, hidden files, <1MB files; AND cross-checks the catalog's samples table — a file referenced as a sample by any set is never attached as a preview.
+- [x] In-folder harvest (user request): `scan` auto-harvests renders found inside project folders (folder placement = signal): name match -> set (+0.05 bonus); no name match in single-set project -> 0.7; else project-level. `--no-previews` opts out (iCloud). Harvest runs post-commit so sample cross-check sees the just-indexed catalog.
+- [x] **ARCHITECTURE: crates/ops extracted** (user wants in-app scanning; "CLI for dev, app for users"): scan_library/hunt_renders/attach moved out of the cli bin into shared ops crate. Layering: als-core+previews -> indexer (storage) -> ops (workflows) -> cli/app (frontends). CLI commands are now thin wrappers.
+- [x] In-app scanning: "Scan folder…" header button -> native picker (tauri-plugin-dialog, dialog:default capability) -> scan_folder command (ops::scan_library incl. harvest) -> stats+results refresh + summary message. NOTE: requires `npm install` (new plugin-dialog dep); per-file progress not yet surfaced (future: Tauri events + progress UI).
+- [ ] **NEXT (user's test plan)**: dump db (`ableton-scan reset --yes`), bounce some current-year tracks into one folder, `scan` the matching projects + `previews` that folder, evaluate match quality from a controlled sample. NO full-system hunt (user explicitly declined).
 - [ ] Later in M3: previews in detail pane (list all, switch primary), historical preview archive, in-app "hunt for previews" UI.
 - [ ] M4: in-app export worker (second Live install + UI automation queue).
 
@@ -205,6 +213,7 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 ./crates
 ./crates/als-core
 ./crates/cli
+./crates/ops
 ./crates/previews
 ./crates/indexer
 ./app
@@ -242,113 +251,113 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 
 ## 5. Recent Git Changes (Summary)
 ```text
+ac7b44d scan auto-harvests in-folder renders as previews (--no-previews opts out); folder placement boosts confidence
+fdced93 Sample safety: discovery cross-checks catalog samples table; known sample paths never attach as previews
+9ede958 Matcher: keep bpm/key/prod tokens as identity (normalize form, not content) per user; add reset subcommand
+d20f14e M3 (discovery half): scattered-render hunt, name matcher, peaks, player bar
 e53f74b Open in Live / Reveal in Finder: open_set command (catalog paths only), row hover button + detail actions
-ac946be Search: weighted bm25 ranking (names >> tracks >> devices/samples) per user feedback; UI verified on host
-99a98da Fix: add app icon (generate_context! requires one even in dev)
-5beacd6 Pre-UI-test housekeeping: organize gitignore (+db/vite ignores), track lockfiles, mark UI skeleton built in context
-cf796a7 UI skeleton: Tauri 2 + React app over shared indexer
 ```
 
 ## 6. Active Diff
 ```diff
 diff --git a/Cargo.lock b/Cargo.lock
-index 89c6175..44f8a4f 100644
+index 44f8a4f..1279cfb 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -135,6 +135,12 @@ dependencies = [
+@@ -129,10 +129,12 @@ dependencies = [
+  "als-core",
+  "dirs 5.0.1",
+  "indexer",
++ "ops",
+  "serde",
+  "serde_json",
+  "tauri",
   "tauri-build",
++ "tauri-plugin-dialog",
  ]
  
-+[[package]]
-+name = "arrayvec"
-+version = "0.7.6"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
-+
  [[package]]
- name = "atk"
- version = "0.18.2"
-@@ -461,6 +467,8 @@ dependencies = [
+@@ -463,12 +465,10 @@ version = "0.1.0"
+ dependencies = [
+  "als-core",
+  "anyhow",
+- "chrono",
   "clap",
   "dirs 5.0.1",
   "indexer",
+- "previews",
+- "rusqlite",
++ "ops",
+  "serde_json",
+ ]
+ 
+@@ -2225,6 +2225,7 @@ checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
+ dependencies = [
+  "bitflags 2.13.0",
+  "block2",
++ "libc",
+  "objc2",
+  "objc2-core-foundation",
+ ]
+@@ -2309,6 +2310,19 @@ version = "1.70.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+ 
++[[package]]
++name = "ops"
++version = "0.1.0"
++dependencies = [
++ "als-core",
++ "anyhow",
++ "chrono",
++ "indexer",
 + "previews",
 + "rusqlite",
-  "serde_json",
- ]
- 
-@@ -872,6 +880,15 @@ version = "1.2.2"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
- 
-+[[package]]
-+name = "encoding_rs"
-+version = "0.8.35"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
-+dependencies = [
-+ "cfg-if",
++ "serde",
 +]
 +
  [[package]]
- name = "equivalent"
- version = "1.0.2"
-@@ -889,6 +906,12 @@ dependencies = [
-  "typeid",
+ name = "option-ext"
+ version = "0.2.0"
+@@ -2735,6 +2749,30 @@ dependencies = [
+  "web-sys",
  ]
  
 +[[package]]
-+name = "extended"
-+version = "0.1.0"
++name = "rfd"
++version = "0.16.0"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
-+
- [[package]]
- name = "fallible-iterator"
- version = "0.3.0"
-@@ -1460,6 +1483,12 @@ dependencies = [
-  "pin-project-lite",
- ]
- 
-+[[package]]
-+name = "http-range"
-+version = "0.1.5"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "21dec9db110f5f872ed9699c3ecf50cf16f423502706ba5c72462e28d3157573"
-+
- [[package]]
- name = "httparse"
- version = "1.10.1"
-@@ -1830,6 +1859,12 @@ dependencies = [
-  "unicode-segmentation",
- ]
- 
-+[[package]]
-+name = "lazy_static"
-+version = "1.5.0"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
-+
- [[package]]
- name = "leb128fmt"
- version = "0.1.0"
-@@ -2469,6 +2504,16 @@ dependencies = [
-  "syn 2.0.117",
- ]
- 
-+[[package]]
-+name = "previews"
-+version = "0.1.0"
++checksum = "a15ad77d9e70a92437d8f74c35d99b4e4691128df018833e99f90bcd36152672"
 +dependencies = [
-+ "anyhow",
-+ "serde_json",
-+ "symphonia",
-+ "walkdir",
++ "block2",
++ "dispatch2",
++ "glib-sys",
++ "gobject-sys",
++ "gtk-sys",
++ "js-sys",
++ "log",
++ "objc2",
++ "objc2-app-kit",
++ "objc2-core-foundation",
++ "objc2-foundation",
++ "raw-window-handle",
++ "wasm-bindgen",
++ "wasm-bindgen-futures",
++ "web-sys",
++ "windows-sys 0.60.2",
 +]
 +
  [[package]]
- name = "proc-macro-crate"
- version = "1.3.1"
-@@ -3124,6 +3169,178 @@ dependencies = [
-  "serde_json",
+ name = "rusqlite"
+ version = "0.32.1"
+@@ -3566,6 +3604,64 @@ dependencies = [
+  "tauri-utils",
+ ]
+ 
++[[package]]
++name = "tauri-plugin"
++version = "2.6.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e126abc9e84e35cdfd01596140a73a1850cdb0df0a23acf0185776c30b469a6e"
++dependencies = [
 ```

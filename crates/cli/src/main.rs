@@ -9,13 +9,12 @@
 //!
 //! Default db: <app data dir>/ableton-library/library.db (override with --db).
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
-use als_core::{discover, parse_set, scan::iso_mtime, ProjectSnapshot, SetSnapshot};
+use als_core::{discover, parse_set, ProjectSnapshot, SetSnapshot};
 
 #[derive(Parser)]
 #[command(name = "ableton-scan", about = "Index Ableton Live projects from the filesystem")]
@@ -155,119 +154,6 @@ fn cmd_reset(yes: bool, db: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Load matcher candidates from the catalog.
-fn set_candidates(conn: &rusqlite::Connection) -> Result<Vec<previews::matching::SetCandidate>> {
-    use previews::matching::normalize;
-    let mut out = Vec::new();
-    for (set_id, project_id, als_path, project_name, count) in
-        indexer::set_match_candidates(conn)?
-    {
-        let stem = Path::new(&als_path)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let proj = project_name.trim_end_matches(" Project");
-        out.push(previews::matching::SetCandidate {
-            set_id,
-            project_id,
-            norm_stem: normalize(&stem),
-            norm_project: normalize(proj),
-            project_set_count: count as usize,
-        });
-    }
-    Ok(out)
-}
-
-/// Extract peaks and build a PreviewRow (shared by previews + attach).
-fn build_preview_row(
-    audio: &Path,
-    set_id: Option<i64>,
-    project_id: Option<i64>,
-    source: &str,
-    confidence: f64,
-) -> Result<indexer::PreviewRow> {
-    let meta = std::fs::metadata(audio)?;
-    let pk = previews::peaks::extract(audio)?;
-    Ok(indexer::PreviewRow {
-        set_id,
-        project_id,
-        audio_path: std::path::absolute(audio)?.to_string_lossy().into_owned(),
-        source: source.into(),
-        confidence,
-        mtime: iso_mtime(audio)?,
-        size: meta.len(),
-        duration: Some(pk.duration_secs),
-        peaks_json: Some(previews::peaks::to_json(&pk.peaks)),
-    })
-}
-
-/// Attach renders found INSIDE one project folder to that project's sets.
-/// Folder placement is strong evidence, so matching is local and generous:
-/// name match -> that set (+0.05 folder bonus); no name match but the project
-/// has exactly one set -> that set at 0.7; otherwise project-level at 0.5.
-fn harvest_folder_renders(
-    conn: &rusqlite::Connection,
-    dir: &Path,
-    project_name: &str,
-    pid: i64,
-    known_samples: &HashSet<String>,
-) -> Result<usize> {
-    use previews::matching::{best_match, normalize, MatchTarget, SetCandidate};
-    let sets = indexer::project_sets(conn, pid)?;
-    if sets.is_empty() {
-        return Ok(0);
-    }
-    let norm_project = normalize(project_name.trim_end_matches(" Project"));
-    let cands: Vec<SetCandidate> = sets
-        .iter()
-        .map(|(set_id, als_path)| SetCandidate {
-            set_id: *set_id,
-            project_id: pid,
-            norm_stem: normalize(
-                &Path::new(als_path)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            ),
-            norm_project: norm_project.clone(),
-            project_set_count: sets.len(),
-        })
-        .collect();
-
-    let mut count = 0usize;
-    for r in previews::discover_renders(&[dir.to_path_buf()])? {
-        let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
-        if known_samples.contains(&abs) {
-            continue;
-        }
-        let (set_id, project_id, confidence) =
-            match best_match(&normalize(&r.stem), &cands, 0.6) {
-                Some(m) => match m.target {
-                    MatchTarget::Set { set_id, project_id } => {
-                        (Some(set_id), Some(project_id), (m.confidence + 0.05).min(1.0))
-                    }
-                    MatchTarget::Project { project_id } => (None, Some(project_id), m.confidence),
-                },
-                // No name resemblance, but a render in a single-set project
-                // folder can only belong to that set.
-                None if sets.len() == 1 => (Some(sets[0].0), Some(pid), 0.7),
-                None => continue,
-            };
-        let mtime = iso_mtime(&r.path)?;
-        if indexer::preview_is_fresh(&conn, set_id, &abs, r.size, &mtime)? {
-            continue;
-        }
-        match build_preview_row(&r.path, set_id, project_id, "discovered", confidence) {
-            Ok(row) => {
-                indexer::upsert_preview(conn, &row)?;
-                count += 1;
-                eprintln!("  preview ({confidence:.2}) {}", r.path.display());
-            }
-            Err(e) => eprintln!("  ERROR decoding {}: {e}", r.path.display()),
-        }
-    }
-    Ok(count)
-}
 
 fn cmd_previews(
     roots: &[PathBuf],
@@ -275,77 +161,17 @@ fn cmd_previews(
     verbose: bool,
     db: Option<PathBuf>,
 ) -> Result<()> {
-    use previews::matching::{best_match, normalize, MatchTarget};
     if roots.is_empty() {
         bail!("give at least one folder to hunt for renders, e.g. ~/Desktop ~/Downloads");
     }
     let conn = indexer::open(&db_path(db)?)?;
-    let cands = set_candidates(&conn)?;
-    if cands.is_empty() {
-        bail!("catalog is empty — run `ableton-scan scan <root>` first");
-    }
-    let known_samples = indexer::all_sample_paths(&conn)?;
-    let renders = previews::discover_renders(roots)?;
-    eprintln!("{} candidate audio file(s) found, matching against {} set(s)…",
-        renders.len(), cands.len());
-
-    let (mut matched, mut fresh, mut ambiguous, mut unmatched, mut errors, mut samples_skipped) =
-        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
-    for r in &renders {
-        // Never attach a file the catalog knows as a SAMPLE of some set.
-        let abs_check = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
-        if known_samples.contains(&abs_check) {
-            samples_skipped += 1;
-            if verbose {
-                eprintln!("  skipped (known sample): {}", r.path.display());
-            }
-            continue;
-        }
-        let norm = normalize(&r.stem);
-        match best_match(&norm, &cands, threshold) {
-            Some(m) => {
-                let (set_id, project_id) = match m.target {
-                    MatchTarget::Set { set_id, project_id } => (Some(set_id), Some(project_id)),
-                    MatchTarget::Project { project_id } => {
-                        ambiguous += 1;
-                        (None, Some(project_id))
-                    }
-                };
-                let abs = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
-                let mtime = iso_mtime(&r.path)?;
-                if indexer::preview_is_fresh(&conn, set_id, &abs, r.size, &mtime)? {
-                    fresh += 1;
-                    continue;
-                }
-                match build_preview_row(&r.path, set_id, project_id, "discovered", m.confidence) {
-                    Ok(row) => {
-                        indexer::upsert_preview(&conn, &row)?;
-                        matched += 1;
-                        eprintln!(
-                            "  matched ({:.2}) {} -> set {:?}",
-                            m.confidence,
-                            r.path.display(),
-                            set_id
-                        );
-                    }
-                    Err(e) => {
-                        errors += 1;
-                        eprintln!("  ERROR decoding {}: {e}", r.path.display());
-                    }
-                }
-            }
-            None => {
-                unmatched += 1;
-                if verbose {
-                    eprintln!("  unmatched: {}", r.path.display());
-                }
-            }
-        }
-    }
+    let mut log = |line: String| eprintln!("  {line}");
+    let s = ops::hunt_renders(&conn, roots, threshold, verbose, &mut log)?;
     eprintln!(
-        "previews done: {matched} matched, {fresh} unchanged, {ambiguous} project-level (ambiguous), {unmatched} unmatched, {samples_skipped} known samples skipped, {errors} errors"
+        "previews done: {} matched, {} unchanged, {} project-level (ambiguous), {} unmatched, {} known samples skipped, {} errors",
+        s.matched, s.unchanged, s.ambiguous, s.unmatched, s.samples_skipped, s.errors
     );
-    if unmatched > 0 && !verbose {
+    if s.unmatched > 0 && !verbose {
         eprintln!("(rerun with --verbose to list unmatched files; use `attach` for manual fixes)");
     }
     Ok(())
@@ -354,9 +180,7 @@ fn cmd_previews(
 fn cmd_attach(set: &str, audio: &Path, db: Option<PathBuf>) -> Result<()> {
     let conn = indexer::open(&db_path(db)?)?;
     let set_id = indexer::resolve_set(&conn, set)?;
-    let project_id = indexer::set_project_id(&conn, set_id)?;
-    let row = build_preview_row(audio, Some(set_id), Some(project_id), "manual", 1.0)?;
-    indexer::upsert_preview(&conn, &row)?;
+    ops::attach(&conn, set_id, audio)?;
     eprintln!("attached {} to set {set_id} (primary recomputed)", audio.display());
     Ok(())
 }
@@ -394,66 +218,17 @@ fn cmd_json(root: &Path, pretty: bool) -> Result<()> {
 fn cmd_scan(root: &Path, db: Option<PathBuf>, force: bool, no_previews: bool) -> Result<()> {
     let db = db_path(db)?;
     let conn = indexer::open(&db)?;
-    let root_abs = std::path::absolute(root)?;
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
-
-    let (mut parsed, mut fresh, mut errors) = (0usize, 0usize, 0usize);
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut harvest_targets: Vec<(PathBuf, String, i64)> = Vec::new();
-
-    conn.execute_batch("BEGIN")?;
-    for proj in discover(&root_abs)? {
-        let folder = std::path::absolute(&proj.dir)?.to_string_lossy().into_owned();
-        let pid = indexer::upsert_project(&conn, &folder, &proj.name, &now)?;
-        harvest_targets.push((proj.dir.clone(), proj.name.clone(), pid));
-        indexer::replace_backups(&conn, pid, &proj.backups)?;
-        for als in &proj.als_files {
-            let als_abs = std::path::absolute(als)?.to_string_lossy().into_owned();
-            seen.insert(als_abs.clone());
-            let size = std::fs::metadata(als)?.len();
-            let mtime = iso_mtime(als)?;
-            if !force && indexer::set_is_fresh(&conn, &als_abs, size, &mtime)? {
-                fresh += 1;
-                continue;
-            }
-            match parse_set(als, &proj.dir) {
-                Ok(snap) => {
-                    indexer::ingest_set(&conn, pid, &snap)?;
-                    parsed += 1;
-                    eprintln!("  indexed {}", als.display());
-                }
-                Err(e) => {
-                    errors += 1;
-                    eprintln!("  ERROR {}: {e}", als.display());
-                }
-            }
-        }
-    }
-    let removed = indexer::prune_missing(&conn, &root_abs.to_string_lossy(), &seen)?;
-    conn.execute_batch("COMMIT")?;
-
-    // Harvest pass: renders sitting inside project folders are near-certain
-    // matches (the folder placement is the signal). Runs after commit so the
-    // samples cross-check sees everything just indexed.
-    let mut harvested = 0usize;
-    if !no_previews {
-        let known_samples = indexer::all_sample_paths(&conn)?;
-        for (dir, name, pid) in &harvest_targets {
-            harvested += harvest_folder_renders(&conn, dir, name, *pid, &known_samples)
-                .unwrap_or_else(|e| {
-                    eprintln!("  preview harvest failed for {}: {e}", dir.display());
-                    0
-                });
-        }
-    }
-
+    let mut log = |line: String| eprintln!("  {line}");
+    let s = ops::scan_library(&conn, root, force, !no_previews, &mut log)?;
     let st = indexer::stats(&conn)?;
     eprintln!(
-        "scan done: {parsed} indexed, {fresh} unchanged, {errors} errors, {removed} pruned, {harvested} preview(s) harvested"
+        "scan done: {} indexed, {} unchanged, {} errors, {} pruned, {} preview(s) harvested",
+        s.indexed, s.unchanged, s.errors, s.pruned, s.harvested
     );
     eprintln!(
-        "catalog: {} projects, {} sets, {} tracks, {} devices, {} samples, {} backups ({})",
-        st.projects, st.sets, st.tracks, st.devices, st.samples, st.backups, db.display()
+        "catalog: {} projects, {} sets, {} tracks, {} devices, {} samples, {} backups, {} previews ({})",
+        st.projects, st.sets, st.tracks, st.devices, st.samples, st.backups, st.previews,
+        db.display()
     );
     Ok(())
 }

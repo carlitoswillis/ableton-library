@@ -73,6 +73,16 @@ fn preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
     }))
 }
 
+/// Index a folder of Ableton projects (incremental; harvests in-folder
+/// renders as previews). Same engine as `ableton-scan scan`.
+#[tauri::command(rename_all = "snake_case")]
+fn scan_folder(root: String) -> Result<ops::ScanSummary, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let mut log = |_line: String| {}; // per-file progress not surfaced yet
+    ops::scan_library(&conn, std::path::Path::new(&root), false, true, &mut log)
+        .map_err(|e| e.to_string())
+}
+
 /// Open the set in Ableton Live (default .als handler), or reveal it in Finder.
 /// Only ever opens paths stored in the catalog — never arbitrary input.
 #[tauri::command(rename_all = "snake_case")]
@@ -100,7 +110,10 @@ fn open_set(set_id: i64, reveal: bool) -> Result<(), String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![search, inspect, stats, open_set, preview])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            search, inspect, stats, open_set, preview, scan_folder
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

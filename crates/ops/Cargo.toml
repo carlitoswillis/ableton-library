@@ -1,0 +1,13 @@
+[package]
+name = "ops"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+als-core = { path = "../als-core" }
+indexer = { path = "../indexer" }
+previews = { path = "../previews" }
+anyhow = "1"
+chrono = "0.4"
+rusqlite = "0.32"
+serde = { version = "1", features = ["derive"] }

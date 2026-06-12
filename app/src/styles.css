@@ -49,6 +49,32 @@ header h1 {
   font-size: 12px;
 }
 
+.scan-btn {
+  margin-left: auto;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.scan-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.scan-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.scan-msg {
+  color: var(--audio);
+  font-size: 12px;
+}
+
 .filters {
   display: flex;
   gap: 8px;

@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import PlayerBar, { PlayerTrack } from "./PlayerBar";
+
+type ScanSummary = {
+  indexed: number;
+  unchanged: number;
+  errors: number;
+  pruned: number;
+  harvested: number;
+};
 
 type SearchHit = {
   set_id: number;
@@ -57,6 +66,8 @@ export default function App() {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [track, setTrack] = useState<PlayerTrack | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanMsg, setScanMsg] = useState<string | null>(null);
 
   const runSearch = useCallback(async () => {
     try {
@@ -79,9 +90,38 @@ export default function App() {
     return () => clearTimeout(t);
   }, [runSearch]);
 
-  useEffect(() => {
+  const refreshStats = useCallback(() => {
     invoke<Stats>("stats").then(setStats).catch((e) => setError(String(e)));
   }, []);
+
+  useEffect(() => {
+    refreshStats();
+  }, [refreshStats]);
+
+  const pickAndScan = async () => {
+    try {
+      const dir = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "Choose a folder of Ableton projects",
+      });
+      if (!dir) return;
+      setScanning(true);
+      setError(null);
+      setScanMsg(null);
+      const s = await invoke<ScanSummary>("scan_folder", { root: dir });
+      setScanMsg(
+        `${s.indexed} indexed, ${s.unchanged} unchanged, ${s.harvested} preview(s) harvested` +
+          (s.errors ? `, ${s.errors} errors` : ""),
+      );
+      refreshStats();
+      runSearch();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setScanning(false);
+    }
+  };
 
   const openDetail = async (id: number) => {
     try {
@@ -127,10 +167,14 @@ export default function App() {
         <h1>Ableton Library</h1>
         {stats && (
           <span className="stats">
-            {stats.projects} projects · {stats.sets} sets · {stats.devices} devices ·{" "}
+            {stats.projects} projects · {stats.sets} sets · {stats.previews} previews ·{" "}
             {stats.backups} backups
           </span>
         )}
+        {scanMsg && <span className="scan-msg">{scanMsg}</span>}
+        <button className="scan-btn" onClick={pickAndScan} disabled={scanning}>
+          {scanning ? "Scanning…" : "Scan folder…"}
+        </button>
       </header>
 
       <div className="filters">
