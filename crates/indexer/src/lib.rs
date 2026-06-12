@@ -504,6 +504,14 @@ pub fn resolve_set(conn: &Connection, query: &str) -> Result<i64> {
         .with_context(|| format!("no set matching '{query}'"))?)
 }
 
+/// Every sample path referenced by any indexed set — used by render discovery
+/// to guarantee a known sample is never mistaken for a bounce.
+pub fn all_sample_paths(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT path FROM samples")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// Raw matcher inputs: (set_id, project_id, als_path, project_name, project_set_count).
 pub fn set_match_candidates(conn: &Connection) -> Result<Vec<(i64, i64, String, String, i64)>> {
     let mut stmt = conn.prepare(

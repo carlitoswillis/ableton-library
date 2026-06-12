@@ -211,13 +211,23 @@ fn cmd_previews(
     if cands.is_empty() {
         bail!("catalog is empty — run `ableton-scan scan <root>` first");
     }
+    let known_samples = indexer::all_sample_paths(&conn)?;
     let renders = previews::discover_renders(roots)?;
     eprintln!("{} candidate audio file(s) found, matching against {} set(s)…",
         renders.len(), cands.len());
 
-    let (mut matched, mut fresh, mut ambiguous, mut unmatched, mut errors) =
-        (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut matched, mut fresh, mut ambiguous, mut unmatched, mut errors, mut samples_skipped) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
     for r in &renders {
+        // Never attach a file the catalog knows as a SAMPLE of some set.
+        let abs_check = std::path::absolute(&r.path)?.to_string_lossy().into_owned();
+        if known_samples.contains(&abs_check) {
+            samples_skipped += 1;
+            if verbose {
+                eprintln!("  skipped (known sample): {}", r.path.display());
+            }
+            continue;
+        }
         let norm = normalize(&r.stem);
         match best_match(&norm, &cands, threshold) {
             Some(m) => {
@@ -260,7 +270,7 @@ fn cmd_previews(
         }
     }
     eprintln!(
-        "previews done: {matched} matched, {fresh} unchanged, {ambiguous} project-level (ambiguous), {unmatched} unmatched, {errors} errors"
+        "previews done: {matched} matched, {fresh} unchanged, {ambiguous} project-level (ambiguous), {unmatched} unmatched, {samples_skipped} known samples skipped, {errors} errors"
     );
     if unmatched > 0 && !verbose {
         eprintln!("(rerun with --verbose to list unmatched files; use `attach` for manual fixes)");
