@@ -205,6 +205,23 @@ header h1 {
   user-select: none;
 }
 
+/* Suggested-bounce grouping (Watch Folders modal) */
+.suggestion-group td {
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.suggestion-badge {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--accent);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 .results td.set {
   max-width: 280px;
   font-weight: 550;

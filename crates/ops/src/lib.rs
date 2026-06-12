@@ -899,41 +899,9 @@ pub struct Suggestion {
     pub audio_path: String,
     pub file_name: String,
     pub confidence: f64,
-}
-
-/// Helper to get candidates for sets that do NOT have a primary preview.
-fn catalog_candidates_without_previews(conn: &Connection) -> Result<Vec<SetCandidate>> {
-    let mut out = Vec::new();
-    let mut stmt = conn.prepare(
-        "SELECT s.id, p.id, s.als_path, p.name,
-                (SELECT COUNT(*) FROM sets s2 WHERE s2.project_id = p.id)
-         FROM sets s JOIN projects p ON p.id = s.project_id
-         WHERE NOT EXISTS (SELECT 1 FROM previews pv WHERE pv.set_id = s.id AND pv.is_primary = 1)",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, i64>(4)?,
-        ))
-    })?;
-    for row in rows {
-        let (set_id, project_id, als_path, project_name, count) = row?;
-        let stem = Path::new(&als_path)
-            .file_stem()
-            .map(|x| x.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        out.push(SetCandidate {
-            set_id,
-            project_id,
-            norm_stem: normalize(&stem),
-            norm_project: normalize(project_name.trim_end_matches(" Project")),
-            project_set_count: count as usize,
-        });
-    }
-    Ok(out)
+    /// The set already has a primary preview — shown so users can swap in a
+    /// better/newer bounce, but the UI should not auto-select these.
+    pub has_preview: bool,
 }
 
 pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
@@ -947,10 +915,24 @@ pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
     let roots: Vec<PathBuf> = watch_folders.iter().map(|(_, p)| PathBuf::from(p)).collect();
     let renders = previews::discover_renders(&roots, Some(3))?; // limit depth to 3 for watch folders
 
-    // 3. Get sets without previews
-    let cands = catalog_candidates_without_previews(conn)?;
+    // 3. Match against ALL sets — sets that already have a preview are
+    //    included (flagged via has_preview) so every matching bounce is
+    //    visible, not just matches for preview-less sets.
+    let cands = catalog_candidates(conn)?;
     if cands.is_empty() {
         return Ok(Vec::new());
+    }
+
+    // Sets that already have a primary preview.
+    let mut previewed: HashSet<i64> = HashSet::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT set_id FROM previews WHERE is_primary = 1 AND set_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        for row in rows {
+            previewed.insert(row?);
+        }
     }
 
     // 4. Match
@@ -1003,6 +985,7 @@ pub fn get_watch_suggestions(conn: &Connection) -> Result<Vec<Suggestion>> {
                     audio_path: abs,
                     file_name,
                     confidence: m.confidence,
+                    has_preview: previewed.contains(&set_id),
                 });
             }
         }

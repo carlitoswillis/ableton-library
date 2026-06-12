@@ -68,6 +68,7 @@ type Suggestion = {
   audio_path: string;
   file_name: string;
   confidence: number;
+  has_preview: boolean;
 };
 
 type Detail = {
@@ -183,6 +184,17 @@ export default function App() {
     try {
       const res = await invoke<Suggestion[]>("get_watch_suggestions");
       setSuggestions(res);
+      // Auto-select the best candidate per set — only for sets that don't
+      // have a preview yet (previewed sets are shown but never auto-linked).
+      const best = new Map<number, Suggestion>();
+      for (const s of res) {
+        if (s.has_preview) continue;
+        const cur = best.get(s.set_id);
+        if (!cur || s.confidence > cur.confidence) best.set(s.set_id, s);
+      }
+      setSelectedSuggestions(
+        Array.from(best.values()).map((s) => `${s.set_id}:${s.audio_path}`)
+      );
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1464,62 +1476,110 @@ export default function App() {
                             onChange={toggleSelectAllSuggestions}
                           />
                         </th>
-                        <th>Ableton Set</th>
-                        <th>Bounce / Match</th>
+                        <th colSpan={2}>Set / Matching Bounces</th>
                         <th className="job-actions" style={{ width: "160px" }}>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {suggestions.map((s) => {
-                        const key = `${s.set_id}:${s.audio_path}`;
-                        return (
-                          <tr key={key}>
-                            <td style={{ textAlign: "center", verticalAlign: "middle" }}>
-                              <input
-                                type="checkbox"
-                                checked={selectedSuggestions.includes(key)}
-                                onChange={() => toggleSelectSuggestion(key)}
-                              />
+                      {(() => {
+                        // Group candidates per set (suggestions arrive sorted
+                        // by confidence, so groups appear best-first and the
+                        // first item in each group is its best match).
+                        type Group = {
+                          set_id: number;
+                          set_name: string;
+                          project_name: string;
+                          has_preview: boolean;
+                          items: Suggestion[];
+                        };
+                        const groups: Group[] = [];
+                        const byId = new Map<number, Group>();
+                        for (const s of suggestions) {
+                          let g = byId.get(s.set_id);
+                          if (!g) {
+                            g = {
+                              set_id: s.set_id,
+                              set_name: s.set_name,
+                              project_name: s.project_name,
+                              has_preview: s.has_preview,
+                              items: [],
+                            };
+                            byId.set(s.set_id, g);
+                            groups.push(g);
+                          }
+                          g.items.push(s);
+                        }
+                        // Sets still missing a preview come first.
+                        groups.sort((a, b) => Number(a.has_preview) - Number(b.has_preview));
+
+                        return groups.flatMap((g) => [
+                          <tr key={`g${g.set_id}`} className="suggestion-group">
+                            <td />
+                            <td colSpan={3}>
+                              <span className="queue-job-title">{g.set_name.replace(/\.als$/, "")}</span>
+                              <span className="queue-job-path" style={{ marginLeft: "8px" }}>
+                                {g.project_name}
+                              </span>
+                              {g.has_preview && (
+                                <span className="suggestion-badge" title="This set already has a preview — linking replaces it as primary">
+                                  has preview
+                                </span>
+                              )}
+                              {g.items.length > 1 && (
+                                <span className="queue-job-path" style={{ marginLeft: "8px" }}>
+                                  {g.items.length} matches
+                                </span>
+                              )}
                             </td>
-                            <td>
-                              <div className="queue-job-title">{s.project_name}</div>
-                              <div className="queue-job-path">{s.set_name}</div>
-                            </td>
-                            <td>
-                              <div className="queue-job-title" title={s.audio_path}>{s.file_name}</div>
-                              <div className="queue-job-path" style={{ color: "var(--accent)" }}>
-                                {Math.round(s.confidence * 100)}% match
-                              </div>
-                            </td>
-                            <td className="job-actions" style={{ width: "160px" }}>
-                              <button
-                                className="remove-job-btn"
-                                style={{ color: "var(--accent)", marginRight: "10px" }}
-                                onClick={() => playSuggestionTrack(s)}
-                                title="Play bounce to check match"
-                              >
-                                ▶ Play
-                              </button>
-                              <button
-                                className="remove-job-btn"
-                                style={{ color: "#85e3b2", marginRight: "10px" }}
-                                onClick={() => linkSuggestion(s.set_id, s.audio_path)}
-                                title="Use this bounce as the set preview"
-                              >
-                                ✓ Link
-                              </button>
-                              <button
-                                className="remove-job-btn"
-                                style={{ color: "#e38585" }}
-                                onClick={() => ignoreSuggestion(s.set_id, s.audio_path)}
-                                title="Don't suggest this match again"
-                              >
-                                × Ignore
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
+                          </tr>,
+                          ...g.items.map((s) => {
+                            const key = `${s.set_id}:${s.audio_path}`;
+                            return (
+                              <tr key={key}>
+                                <td style={{ textAlign: "center", verticalAlign: "middle" }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedSuggestions.includes(key)}
+                                    onChange={() => toggleSelectSuggestion(key)}
+                                  />
+                                </td>
+                                <td colSpan={2}>
+                                  <div className="queue-job-title" title={s.audio_path}>{s.file_name}</div>
+                                  <div className="queue-job-path" style={{ color: "var(--accent)" }}>
+                                    {Math.round(s.confidence * 100)}% match
+                                  </div>
+                                </td>
+                                <td className="job-actions" style={{ width: "160px" }}>
+                                  <button
+                                    className="remove-job-btn"
+                                    style={{ color: "var(--accent)", marginRight: "10px" }}
+                                    onClick={() => playSuggestionTrack(s)}
+                                    title="Play bounce to check match"
+                                  >
+                                    ▶ Play
+                                  </button>
+                                  <button
+                                    className="remove-job-btn"
+                                    style={{ color: "#85e3b2", marginRight: "10px" }}
+                                    onClick={() => linkSuggestion(s.set_id, s.audio_path)}
+                                    title="Use this bounce as the set preview"
+                                  >
+                                    ✓ Link
+                                  </button>
+                                  <button
+                                    className="remove-job-btn"
+                                    style={{ color: "#e38585" }}
+                                    onClick={() => ignoreSuggestion(s.set_id, s.audio_path)}
+                                    title="Don't suggest this match again"
+                                  >
+                                    × Ignore
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          }),
+                        ]);
+                      })()}
                     </tbody>
                   </table>
                 )}
