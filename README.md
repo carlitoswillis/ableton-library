@@ -28,6 +28,7 @@ ableton-scan stats
 ableton-scan previews ~/Desktop ~/Downloads "<bounce folders...>"
 ableton-scan previews ~/Desktop --verbose      # also list unmatched files
 ableton-scan attach "522 idea" ~/Desktop/522-bounce.mp3   # manual match
+ableton-scan reset --yes                       # delete the catalog (rebuildable)
 
 # one-shot JSON dump, no database (oracle-compatible output)
 # convention: redirect outputs into exports/ (gitignored)

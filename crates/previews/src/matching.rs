@@ -16,19 +16,36 @@ const STOPWORDS: &[&str] = &[
     "edit", "full", "song", "track", "new", "old", "copy",
 ];
 
-/// Normalize a name for comparison: lowercase, strip bracketed chunks,
-/// punctuation -> spaces, drop stopwords / vN / bpm / key-ish tokens.
+/// Normalize a name for comparison. Philosophy (user decision 2026-06-11):
+/// bpm / key / "(prod. x)" are often PART of project names, so they are
+/// distinguishing signal — keep them, normalize their FORM instead:
+/// - lowercase; punctuation -> spaces (parenthesized content kept)
+/// - [bracketed] chunks stripped (Live backup timestamps, never identity)
+/// - digit/letter boundaries split ("145bpm" -> "145 bpm") so both sides
+///   tokenize identically
+/// - only true noise dropped: stopwords (final/master/...) and vN tokens
 pub fn normalize(s: &str) -> String {
     let lower = s.to_lowercase();
-    // strip (...) and [...] chunks (often "(prod. x)" "[2026-05-29 1153]")
+    // strip only [...] chunks; keep (...) content (often "(prod. x)" = identity)
     let mut cleaned = String::with_capacity(lower.len());
     let mut depth = 0i32;
+    let mut prev: Option<char> = None;
     for c in lower.chars() {
         match c {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth = (depth - 1).max(0),
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth = (depth - 1).max(0),
             _ if depth == 0 => {
-                cleaned.push(if c.is_alphanumeric() { c } else { ' ' })
+                let out = if c.is_alphanumeric() { c } else { ' ' };
+                // split digit<->letter boundaries: 145bpm -> 145 bpm
+                if let Some(p) = prev {
+                    if (p.is_ascii_digit() && out.is_alphabetic())
+                        || (p.is_alphabetic() && out.is_ascii_digit())
+                    {
+                        cleaned.push(' ');
+                    }
+                }
+                cleaned.push(out);
+                prev = if out == ' ' { None } else { Some(out) };
             }
             _ => {}
         }
@@ -44,10 +61,6 @@ pub fn normalize(s: &str) -> String {
                 && t.starts_with('v')
                 && t[1..].chars().all(|c| c.is_ascii_digit())
             {
-                return false;
-            }
-            // 163bpm / bpm
-            if *t == "bpm" || (t.ends_with("bpm") && t[..t.len() - 3].chars().all(|c| c.is_ascii_digit())) {
                 return false;
             }
             true
@@ -155,10 +168,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_noise() {
+    fn normalizes_noise_keeps_identity() {
         assert_eq!(normalize("wanna be your FINAL v2"), "wanna be your");
-        assert_eq!(normalize("cult (prod. barlitxs) 145bpm"), "cult");
+        // bpm/prod/key are identity, kept; form normalized (145bpm -> 145 bpm)
+        assert_eq!(normalize("cult (prod. barlitxs) 145bpm"), "cult prod barlitxs 145 bpm");
+        assert_eq!(
+            normalize("sky high 2020 (prod. barlitxs) 88 bpm Db minor"),
+            "sky high 2020 prod barlitxs 88 bpm db minor"
+        );
+        // bracketed backup timestamps are never identity
+        assert_eq!(normalize("king st [2026-05-29 202646]"), "king st");
         assert_eq!(normalize("522 idea"), "522 idea");
+    }
+
+    #[test]
+    fn bpm_in_both_names_disambiguates() {
+        // a render carrying the bpm should prefer the matching long-form name
+        let with = score(
+            &normalize("cult 145bpm"),
+            &normalize("cult (prod. barlitxs) 145 bpm G minor"),
+        );
+        let without = score(&normalize("cult 145bpm"), &normalize("cult 152 bpm A minor"));
+        assert!(with > without);
     }
 
     #[test]

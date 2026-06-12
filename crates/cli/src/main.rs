@@ -80,6 +80,14 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Delete the catalog database. Safe: it is fully rebuildable by rescanning.
+    Reset {
+        /// Actually delete (without this, just shows what would be removed).
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
     /// Manually attach an audio file to a set (confidence 1.0).
     Attach {
         /// Set id, exact path, or path fragment.
@@ -112,7 +120,34 @@ fn main() -> Result<()> {
             cmd_previews(&roots, threshold, verbose, db)
         }
         Cmd::Attach { set, audio, db } => cmd_attach(&set, &audio, db),
+        Cmd::Reset { yes, db } => cmd_reset(yes, db),
     }
+}
+
+fn cmd_reset(yes: bool, db: Option<PathBuf>) -> Result<()> {
+    let db = db_path(db)?;
+    let targets: Vec<PathBuf> = ["", "-wal", "-shm"]
+        .iter()
+        .map(|sfx| PathBuf::from(format!("{}{}", db.display(), sfx)))
+        .filter(|p| p.exists())
+        .collect();
+    if targets.is_empty() {
+        eprintln!("nothing to delete — no catalog at {}", db.display());
+        return Ok(());
+    }
+    if !yes {
+        eprintln!("would delete:");
+        for t in &targets {
+            eprintln!("  {}", t.display());
+        }
+        eprintln!("rerun with --yes to confirm (the catalog is rebuildable by rescanning)");
+        return Ok(());
+    }
+    for t in &targets {
+        std::fs::remove_file(t)?;
+        eprintln!("deleted {}", t.display());
+    }
+    Ok(())
 }
 
 /// Load matcher candidates from the catalog.

@@ -8,7 +8,9 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 - [x] crates/previews: render hunt (audio exts, >=1MB, skips Samples/Backup/Project Info dirs), normalizer (stopwords/vN/bpm/bracketed chunks), scorer (exact 1.0 > word-boundary prefix 0.85 > token Jaccard; project-name fallback -> single-set x0.9 else project-level x0.5), symphonia peak extraction (<=1500 bins, coarse-then-downsample, JSON).
 - [x] CLI: `previews <roots...> [--threshold 0.6] [--verbose]` (freshness-checked, decode only matches) + `attach <set> <audio>` (manual, confidence 1.0). Primary = highest confidence then newest.
 - [x] App: `preview` command; asset protocol enabled (scope **, tauri feature protocol-asset — user added the cargo feature); bottom PlayerBar (canvas waveform, click-seek, match-confidence shown when <85%); ▶ on rows with previews.
-- [ ] **NEXT (on user's Mac)**: cargo build; `ableton-scan previews <some bounce folder>` against indexed sets; check match quality (then tune threshold/stopwords); run app, play something.
+- **Matcher revision (user feedback)**: bpm/key/"(prod. x)" are often PART of project names (user's old naming habit) — KEEP them as distinguishing signal; normalize form instead ("145bpm" -> "145 bpm"); strip only [bracketed timestamps], stopwords (final/master/...), vN. Tests cover the disambiguation case.
+- [x] `reset` subcommand (deletes db + WAL/SHM; dry-run unless --yes).
+- [ ] **NEXT (user's test plan)**: dump db (`ableton-scan reset --yes`), bounce some current-year tracks into one folder, `scan` the matching projects + `previews` that folder, evaluate match quality from a controlled sample. NO full-system hunt (user explicitly declined).
 - [ ] Later in M3: previews in detail pane (list all, switch primary), historical preview archive, in-app "hunt for previews" UI.
 - [ ] M4: in-app export worker (second Live install + UI automation queue).
 
