@@ -47,6 +47,70 @@ enum Done {
     },
 }
 
+/// Two-priority work deque for the unified scan pool. Decode jobs go to the
+/// FRONT so previews populate as soon as a project finishes ingesting,
+/// instead of waiting behind the entire remaining parse backlog (a plain
+/// FIFO channel had exactly that problem: previews only appeared at the end
+/// of the scan).
+struct JobQueue {
+    q: std::sync::Mutex<std::collections::VecDeque<Job>>,
+    cv: std::sync::Condvar,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl JobQueue {
+    fn new() -> Self {
+        Self {
+            q: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            cv: std::sync::Condvar::new(),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Parse jobs: normal priority (back of the deque).
+    fn push_back(&self, job: Job) {
+        self.q.lock().unwrap().push_back(job);
+        self.cv.notify_one();
+    }
+
+    /// Decode jobs: high priority (front of the deque).
+    fn push_front(&self, job: Job) {
+        self.q.lock().unwrap().push_front(job);
+        self.cv.notify_one();
+    }
+
+    /// No more jobs will ever be pushed; wake everyone so they can exit.
+    fn close(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cv.notify_all();
+    }
+
+    /// Blocking pop. Returns None when the queue is closed (and drained) or
+    /// cancellation is requested. The timeout exists so a parked worker
+    /// notices `cancel` even if nobody notifies the condvar again.
+    fn pop(&self, cancel: Option<&std::sync::atomic::AtomicBool>) -> Option<Job> {
+        let mut guard = self.q.lock().unwrap();
+        loop {
+            if let Some(c) = cancel {
+                if c.load(std::sync::atomic::Ordering::Relaxed) {
+                    return None;
+                }
+            }
+            if let Some(job) = guard.pop_front() {
+                return Some(job);
+            }
+            if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
+                return None;
+            }
+            let (g, _) = self
+                .cv
+                .wait_timeout(guard, std::time::Duration::from_millis(50))
+                .unwrap();
+            guard = g;
+        }
+    }
+}
+
 #[derive(Debug, Default, serde::Serialize)]
 pub struct ScanSummary {
     pub indexed: usize,
@@ -141,44 +205,38 @@ pub fn scan_library(
     // Unified worker pool: .als parsing and preview decoding share one job
     // queue, so preview decoding never stalls forward progress on indexing.
     // Workers do CPU/disk work; the main thread does matching + SQLite writes.
+    // Decode jobs are pushed to the FRONT of the queue so previews populate
+    // live during the scan instead of after the whole parse backlog.
     let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    // Job queue is unbounded so the main thread can always enqueue newly
-    // planned decode jobs without blocking (it is also the result consumer —
-    // blocking here would deadlock). Results are bounded for backpressure.
-    let (job_tx, job_rx) = std::sync::mpsc::channel::<Job>();
-    let job_rx = std::sync::Mutex::new(job_rx);
+    let queue = JobQueue::new();
+    // Results are bounded for backpressure; the job queue is unbounded so the
+    // main thread (also the result consumer) never blocks while enqueueing.
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Done>(num_cpus * 2);
 
     let mut outstanding = 0usize;
     for (als, proj_dir, pid) in parse_tasks {
-        job_tx.send(Job::Parse { als, proj_dir, pid }).ok();
+        queue.push_back(Job::Parse { als, proj_dir, pid });
         outstanding += 1;
     }
     for job in initial_decode_jobs {
-        job_tx.send(Job::Decode(job)).ok();
+        queue.push_front(Job::Decode(job));
         outstanding += 1;
     }
 
     std::thread::scope(|scope| {
         for _ in 0..num_cpus {
             let done_tx = done_tx.clone();
-            let job_rx = &job_rx;
+            let queue = &queue;
             scope.spawn(move || {
                 loop {
-                    if let Some(c) = cancel {
-                        if c.load(std::sync::atomic::Ordering::Relaxed) {
-                            break;
-                        }
-                    }
-                    let job = job_rx.lock().unwrap().recv();
-                    match job {
-                        Ok(Job::Parse { als, proj_dir, pid }) => {
+                    match queue.pop(cancel) {
+                        Some(Job::Parse { als, proj_dir, pid }) => {
                             let res = parse_set(&als, &proj_dir);
                             if done_tx.send(Done::Parsed { als, pid, res }).is_err() {
                                 break;
                             }
                         }
-                        Ok(Job::Decode(job)) => {
+                        Some(Job::Decode(job)) => {
                             let res = build_preview_row(
                                 &job.audio,
                                 job.set_id,
@@ -190,7 +248,7 @@ pub fn scan_library(
                                 break;
                             }
                         }
-                        Err(_) => break, // queue closed — no more work
+                        None => break, // queue closed or scan cancelled
                     }
                 }
             });
@@ -241,10 +299,12 @@ pub fn scan_library(
                                 if let Some((dir, name)) = project_info.remove(&pid) {
                                     match plan_folder_harvest(conn, &dir, &name, pid, &known_samples, cancel) {
                                         Ok(jobs) => {
+                                            // Front of the queue: previews for a
+                                            // finished project decode before the
+                                            // remaining parse backlog.
                                             for job in jobs {
-                                                if job_tx.send(Job::Decode(job)).is_ok() {
-                                                    outstanding += 1;
-                                                }
+                                                queue.push_front(Job::Decode(job));
+                                                outstanding += 1;
                                             }
                                         }
                                         Err(e) => log(format!(
@@ -272,7 +332,7 @@ pub fn scan_library(
         }
 
         // Close the job queue so idle workers exit and the scope can join.
-        drop(job_tx);
+        queue.close();
     });
 
     let stale_previews = indexer::prune_stale_previews(conn)?;
