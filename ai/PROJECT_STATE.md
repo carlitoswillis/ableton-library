@@ -93,7 +93,7 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 - **Repo conventions**: scan JSON outputs go in `exports/` (gitignored); lockfiles (Cargo.lock, app/package-lock.json) ARE tracked (user flipped to binary-project convention); local *.db files gitignored (catalog = rebuildable cache, lives in app data dir). (2026-06-11)
 
 ## Backlog
-- [ ] Automated Live export worker (second Live install + UI automation; see ARCHITECTURE.md Preview Service)
+- [ ] Automated Live export worker (second Live install + UI automation; see ARCHITECTURE.md Preview Service) [cmd + a to select all in arragement view, cmd + r then click export, but if there is no arrangement!! like if nothing is there, or we are playing from session view then export some or all of the session view scences/rows]
 - [ ] Preview archive: keep historical previews per set, potentially anchored to Backup/ timestamps (stretch; pairs with --deep backup parsing)
 - [ ] Sample `evicted` state: detect iCloud `.icloud` placeholders vs truly missing files
 - [ ] `roots` table + `rescan` subcommand (refresh all previously scanned roots)
