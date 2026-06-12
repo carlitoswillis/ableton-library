@@ -4,26 +4,25 @@ PURPOSE: This is the authoritative rulebook for AI assistants. It defines the 'h
 
 ## Project Context
 - **Objective**: Build a local-first system to browse, search, organize, and preview Ableton projects without opening Ableton Live.
-- **Implementation Strategy**: Technology agnostic. Focus on portable, local-first solutions.
-- **Potential Stacks**:
-  - **Backend**: Node.js, Python (FastAPI), Go, or Rust.
-  - **Storage**: SQLite, DuckDB, or JSON/Flat-file.
-  - **Frontend**: React, Vue, or Desktop Native (Electron, Tauri).
+- **Stack (decided 2026-06-11)**: Rust core + Tauri 2 desktop shell + React 18/TS frontend + SQLite (rusqlite + FTS5). CLI-first development: core logic validated via CLI before UI integration.
+- **Working style**: User is NOT writing Rust — AI writes all code, user compiles/tests on their Mac and gives product feedback. The sandbox cannot run cargo; ALL Rust verification happens on the user's machine.
 
 ## Architecture Constraints
 - **No Ableton SDK dependency**: User runs Live 11; the Extensions SDK (Live 12 Suite beta only) is off the table. Filesystem-first is the strategy, not a fallback.
 - **Version tolerance (backward + forward)**: Parser must handle .als files from older Live versions (9/10/11) and newer ones (12+). Extract leniently — skip unknown elements, never hard-fail on schema drift, record the Live version (Creator attribute) per set.
-- **API/Service Structure**: Modular service for metadata and preview management.
-- **Database/Persistence**: Local persistence for indexing and snapshots.
-- **Markdown Persistence**: All state must be tracked in `/ai`.
+- **Crate layering**: `als-core` + `previews` → `indexer` (storage) → `ops` (workflows) → `cli` / `app` (frontends). Never import a frontend crate from a library crate.
+- **Database/Persistence**: SQLite in app data dir (`~/Library/Application Support/ableton-library/library.db`). Catalog is always fully rebuildable from `.als` files. Never store DB inside user project folders.
+- **Markdown Persistence**: All project state must be tracked in `/ai`.
 - **Local First**: Assume local filesystem and no cloud dependencies.
+- **Incremental catalog**: Never assume the catalog is complete — user scans subfolders piecemeal. UI and queries treat the catalog as "what's been indexed so far".
 
 ## Coding Conventions
 - **Explicit over Implicit**: Avoid hidden logic, reflection, or complex inheritance.
-- **Verification First**: All changes must be verified via tests and project-specific validation scripts.
+- **Verification First**: All changes must be verified via tests and project-specific validation scripts. Keep `tools/reference_extract.py` in sync with any `als-core` parser change.
 - **Compact Context**: Keep context files task-scoped and minimal.
-- **Verify Before Building**: Never assume SDK capabilities; verify and document findings first.
-- **Catalog First**: Prioritize metadata cataloging over audio preview generation or AI features.
+- **Async + spawn_blocking**: ALL Tauri commands must be `async`. Any command touching disk/db goes in `spawn_blocking`. (Learned from beach-ball incident — sync commands run on main thread.)
+- **Multi-threading pattern**: CPU-bound batch work (`.als` parsing, audio peak extraction) uses `std::thread::scope` with worker threads funneling results to main thread for sequential SQLite writes.
+- **Export worker**: Automated Live export uses macOS UI automation (`tools/export_set.py`). Serialize one render at a time; treat Live as flaky (timeouts, retry once, mark failed rather than wedging queue).
 
 ## How to Navigate This Workspace (Priority Flow)
 To minimize token waste and maximize focus, follow this priority sequence:

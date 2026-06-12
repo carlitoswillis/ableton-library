@@ -27,6 +27,8 @@ Welcome to the roadmap! This document is designed for quick human reading to see
   * **Peak extraction**: Decode audio using `symphonia` and downsample to canvas peaks.
   * **Player UI**: Interactive bottom player bar with canvas waveform, click-to-seek, and play/pause controls.
   * **Tauri scan progress**: Live-scrolling logs terminal inside the app, stats counters, and full scan cancel/background minimize support.
+  * **Multi-threaded scanning**: Library scanning (`.als` decompression + XML parsing), bulk preview scan, and in-folder preview harvest all parallelized via `std::thread::scope` across all CPU cores (~6-8x speedup).
+  * **BPM parsing & duplicate render filtering**: Enhanced BPM extraction and smarter filtering of duplicate render matches.
 * **Up Next (Backlog)**:
   * 🔀 **Previews list & primary switcher**: Show all matched/manual previews for a set in the detail pane, play them, and choose which one is the "Primary" preview.
   * 🔄 **`roots` table & rescan**: Remember all folders that have been scanned in a database table so they can be refreshed at the click of a button.
@@ -44,7 +46,7 @@ Welcome to the roadmap! This document is designed for quick human reading to see
 1. **`crates/als-core`**: gzip + streaming XML parser (extremely fast, memory safe).
 2. **`crates/previews`**: Symphonia audio decoder, waveform peak extractor, name similarity scorer.
 3. **`crates/indexer`**: SQLite + FTS5 search schema and queries.
-4. **`crates/ops`**: High-level library scan, preview attach, and render hunt workflows.
+4. **`crates/ops`**: High-level library scan, preview attach, and render hunt workflows. Multi-threaded via `std::thread::scope`.
 5. **`app/src-tauri`**: Tauri 2 Rust backend commands (async, running heavy tasks in `spawn_blocking`).
 6. **`app/src`**: React 18 + TS + Vite webview frontend.
 
@@ -53,6 +55,7 @@ Welcome to the roadmap! This document is designed for quick human reading to see
 ## 📋 Next Tasks Selection
 When you are ready for the next task, we can tackle one of the following:
 
-1. **Previews list & primary switcher in detail pane**: Exposes multiple previews per set in the UI, allowing you to preview different mix iterations and select your favorite.
-2. **`roots` table + rescan button**: Remembers previously scanned project libraries to enable quick refreshes/rescans from the app header.
-3. **iCloud `evicted` state detection**: Adds support for recognizing evicted `.icloud` sample placeholders.
+1. **Naming consistency pass**: Unify terminology across the codebase (`hunt`/`harvest`/`discover`, `render`/`preview`, `ops`→`workflows`, etc.) — see ARCHITECTURE.md for the full table.
+2. **Previews list & primary switcher in detail pane**: Exposes multiple previews per set in the UI, allowing you to preview different mix iterations and select your favorite.
+3. **`roots` table + rescan button**: Remembers previously scanned project libraries to enable quick refreshes/rescans from the app header.
+4. **iCloud `evicted` state detection**: Adds support for recognizing evicted `.icloud` sample placeholders.

@@ -40,8 +40,26 @@ pub fn scan_library(
 
     let mut s = ScanSummary::default();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut harvest_targets: Vec<(PathBuf, String, i64)> = Vec::new();
 
+    // Build known_samples up front (catches previously indexed sets), then
+    // grow it incrementally as we ingest new sets so the harvest cross-check
+    // is always up-to-date.
+    let mut known_samples = if harvest {
+        indexer::all_sample_paths(conn)?
+    } else {
+        HashSet::new()
+    };
+
+    // Track how many parse tasks remain per project so we can harvest
+    // immediately once a project is fully ingested.
+    let mut pending_per_project: std::collections::HashMap<i64, usize> =
+        std::collections::HashMap::new();
+    // Project info needed for harvest, keyed by pid.
+    let mut project_info: std::collections::HashMap<i64, (PathBuf, String)> =
+        std::collections::HashMap::new();
+
+    let mut tasks = Vec::new();
+    
     conn.execute_batch("BEGIN")?;
     for proj in discover(&root_abs)? {
         if let Some(c) = cancel {
@@ -51,35 +69,135 @@ pub fn scan_library(
         }
         let folder = std::path::absolute(&proj.dir)?.to_string_lossy().into_owned();
         let pid = indexer::upsert_project(conn, &folder, &proj.name, &now)?;
-        harvest_targets.push((proj.dir.clone(), proj.name.clone(), pid));
         indexer::replace_backups(conn, pid, &proj.backups)?;
-        for als in &proj.als_files {
+        
+        if harvest {
+            project_info.insert(pid, (proj.dir.clone(), proj.name.clone()));
+        }
+
+        let mut project_task_count = 0usize;
+        for als in proj.als_files {
             if let Some(c) = cancel {
                 if c.load(std::sync::atomic::Ordering::Relaxed) {
                     anyhow::bail!("scan cancelled by user");
                 }
             }
-            let als_abs = std::path::absolute(als)?.to_string_lossy().into_owned();
+            let als_abs = std::path::absolute(&als)?.to_string_lossy().into_owned();
             seen.insert(als_abs.clone());
-            let size = std::fs::metadata(als)?.len();
-            let mtime = iso_mtime(als)?;
+            let size = std::fs::metadata(&als)?.len();
+            let mtime = iso_mtime(&als)?;
             if !force && indexer::set_is_fresh(conn, &als_abs, size, &mtime)? {
                 s.unchanged += 1;
                 continue;
             }
-            match parse_set(als, &proj.dir) {
-                Ok(snap) => {
-                    indexer::ingest_set(conn, pid, &snap)?;
-                    s.indexed += 1;
-                    log(format!("indexed {}", als.display()));
-                }
-                Err(e) => {
-                    s.errors += 1;
-                    log(format!("ERROR {}: {e}", als.display()));
-                }
+            tasks.push((als, proj.dir.clone(), pid));
+            project_task_count += 1;
+        }
+
+        if harvest && project_task_count > 0 {
+            pending_per_project.insert(pid, project_task_count);
+        } else if harvest && project_task_count == 0 {
+            // All sets were fresh (unchanged) — harvest immediately in case
+            // new renders appeared in the folder since last scan.
+            match harvest_folder_renders(conn, &proj.dir, &proj.name, pid, &known_samples, cancel, log) {
+                Ok(n) => s.harvested += n,
+                Err(e) => log(format!("preview harvest failed for {}: {e}", proj.dir.display())),
             }
         }
     }
+
+    // Process parsing in parallel
+    let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let (tx, rx) = std::sync::mpsc::sync_channel(num_cpus * 2);
+    let tasks_iter = std::sync::Mutex::new(tasks.into_iter());
+
+    std::thread::scope(|scope| {
+        for _ in 0..num_cpus {
+            let tx = tx.clone();
+            let tasks_iter = &tasks_iter;
+            scope.spawn(move || {
+                loop {
+                    if let Some(c) = cancel {
+                        if c.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                    let task = {
+                        let mut iter = tasks_iter.lock().unwrap();
+                        iter.next()
+                    };
+                    match task {
+                        Some((als, proj_dir, pid)) => {
+                            let snap = parse_set(&als, &proj_dir);
+                            if tx.send((als, pid, snap)).is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            });
+        }
+        drop(tx);
+
+        for (als, pid, res) in rx {
+            match res {
+                Ok(snap) => {
+                    // Add this set's sample paths to known_samples before harvest
+                    if harvest {
+                        for sample in &snap.samples {
+                            known_samples.insert(sample.path.clone());
+                        }
+                    }
+
+                    if let Err(e) = indexer::ingest_set(conn, pid, &snap) {
+                        s.errors += 1;
+                        log(format!("ERROR inserting {}: {}", als.display(), e));
+                    } else {
+                        s.indexed += 1;
+                        log(format!("indexed {}", als.display()));
+                    }
+
+                    // Check if this project is now fully ingested → harvest
+                    if harvest {
+                        if let Some(remaining) = pending_per_project.get_mut(&pid) {
+                            *remaining -= 1;
+                            if *remaining == 0 {
+                                pending_per_project.remove(&pid);
+                                if let Some((dir, name)) = project_info.remove(&pid) {
+                                    match harvest_folder_renders(conn, &dir, &name, pid, &known_samples, cancel, log) {
+                                        Ok(n) => s.harvested += n,
+                                        Err(e) => log(format!("preview harvest failed for {}: {e}", dir.display())),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    s.errors += 1;
+                    log(format!("ERROR parsing {}: {}", als.display(), e));
+
+                    // Still decrement pending count on errors
+                    if harvest {
+                        if let Some(remaining) = pending_per_project.get_mut(&pid) {
+                            *remaining -= 1;
+                            if *remaining == 0 {
+                                pending_per_project.remove(&pid);
+                                if let Some((dir, name)) = project_info.remove(&pid) {
+                                    match harvest_folder_renders(conn, &dir, &name, pid, &known_samples, cancel, log) {
+                                        Ok(n) => s.harvested += n,
+                                        Err(e2) => log(format!("preview harvest failed for {}: {e2}", dir.display())),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     let stale_previews = indexer::prune_stale_previews(conn)?;
     for (_, path) in stale_previews {
         log(format!("preview removed (missing from disk): {}", path));
@@ -87,24 +205,6 @@ pub fn scan_library(
     s.pruned = indexer::prune_missing(conn, &root_abs.to_string_lossy(), &seen)?;
     conn.execute_batch("COMMIT")?;
 
-
-    // Harvest pass: renders sitting inside project folders are near-certain
-    // matches (folder placement is the signal). Runs after commit so the
-    // samples cross-check sees everything just indexed.
-    if harvest {
-        let known_samples = indexer::all_sample_paths(conn)?;
-        for (dir, name, pid) in &harvest_targets {
-            if let Some(c) = cancel {
-                if c.load(std::sync::atomic::Ordering::Relaxed) {
-                    anyhow::bail!("scan cancelled by user");
-                }
-            }
-            match harvest_folder_renders(conn, dir, name, *pid, &known_samples, cancel, log) {
-                Ok(n) => s.harvested += n,
-                Err(e) => log(format!("preview harvest failed for {}: {e}", dir.display())),
-            }
-        }
-    }
     Ok(s)
 }
 
@@ -224,7 +324,8 @@ pub fn harvest_folder_renders(
         }
     }
 
-    // Second pass: process the winners
+    // Second pass: filter winners against DB state
+    let mut tasks = Vec::new();
     for (key, win) in winners {
         let (set_id, project_id) = key;
         let abs = std::path::absolute(&win.render.path)?.to_string_lossy().into_owned();
@@ -243,16 +344,54 @@ pub fn harvest_folder_renders(
                 }
             }
         }
-
-        match build_preview_row(&win.render.path, set_id, project_id, "discovered", win.confidence) {
-            Ok(row) => {
-                indexer::upsert_preview(conn, &row)?;
-                count += 1;
-                log(format!("preview ({:.2}) {}", win.confidence, win.render.path.display()));
-            }
-            Err(e) => log(format!("ERROR decoding {}: {}", win.render.path.display(), e)),
-        }
+        
+        tasks.push((key, win));
     }
+
+    // Third pass: decode audio in parallel
+    let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let (tx, rx) = std::sync::mpsc::sync_channel(num_cpus * 2);
+    let tasks_iter = std::sync::Mutex::new(tasks.into_iter());
+
+    std::thread::scope(|scope| {
+        for _ in 0..num_cpus {
+            let tx = tx.clone();
+            let tasks_iter = &tasks_iter;
+            scope.spawn(move || {
+                loop {
+                    let task = {
+                        let mut iter = tasks_iter.lock().unwrap();
+                        iter.next()
+                    };
+                    match task {
+                        Some((key, win)) => {
+                            let (set_id, project_id) = key;
+                            let row_res = build_preview_row(&win.render.path, set_id, project_id, "discovered", win.confidence);
+                            if tx.send((win, row_res)).is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            });
+        }
+        drop(tx);
+
+        for (win, row_res) in rx {
+            match row_res {
+                Ok(row) => {
+                    if let Err(e) = indexer::upsert_preview(conn, &row) {
+                        log(format!("ERROR inserting preview {}: {}", win.render.path.display(), e));
+                    } else {
+                        count += 1;
+                        log(format!("preview ({:.2}) {}", win.confidence, win.render.path.display()));
+                    }
+                }
+                Err(e) => log(format!("ERROR decoding {}: {}", win.render.path.display(), e)),
+            }
+        }
+    });
     
     Ok(count)
 }
@@ -350,7 +489,8 @@ pub fn hunt_renders(
         }
     }
 
-    // Second pass: process the winners
+    // Second pass: filter winners against DB state
+    let mut tasks = Vec::new();
     for (key, win) in winners {
         let (set_id, project_id) = key;
         let abs = std::path::absolute(&win.render.path)?.to_string_lossy().into_owned();
@@ -371,24 +511,59 @@ pub fn hunt_renders(
                 }
             }
         }
+        
+        tasks.push((key, win));
+    }
 
-        match build_preview_row(&win.render.path, set_id, project_id, "discovered", win.confidence) {
-            Ok(row) => {
-                indexer::upsert_preview(conn, &row)?;
-                s.matched += 1;
-                log(format!(
-                    "matched ({:.2}) {} -> set {:?}",
-                    win.confidence,
-                    win.render.path.display(),
-                    set_id
-                ));
-            }
-            Err(e) => {
-                s.errors += 1;
-                log(format!("ERROR decoding {}: {}", win.render.path.display(), e));
+    // Third pass: decode audio in parallel
+    let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let (tx, rx) = std::sync::mpsc::sync_channel(num_cpus * 2);
+    let tasks_iter = std::sync::Mutex::new(tasks.into_iter());
+
+    std::thread::scope(|scope| {
+        for _ in 0..num_cpus {
+            let tx = tx.clone();
+            let tasks_iter = &tasks_iter;
+            scope.spawn(move || {
+                loop {
+                    let task = {
+                        let mut iter = tasks_iter.lock().unwrap();
+                        iter.next()
+                    };
+                    match task {
+                        Some((key, win)) => {
+                            let (set_id, project_id) = key;
+                            let row_res = build_preview_row(&win.render.path, set_id, project_id, "discovered", win.confidence);
+                            if tx.send((win, row_res, set_id)).is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            });
+        }
+        drop(tx);
+
+        for (win, row_res, set_id) in rx {
+            match row_res {
+                Ok(row) => {
+                    if let Err(e) = indexer::upsert_preview(conn, &row) {
+                        s.errors += 1;
+                        log(format!("ERROR inserting preview {}: {}", win.render.path.display(), e));
+                    } else {
+                        s.matched += 1;
+                        log(format!("matched ({:.2}) {} -> set {:?}", win.confidence, win.render.path.display(), set_id));
+                    }
+                }
+                Err(e) => {
+                    s.errors += 1;
+                    log(format!("ERROR decoding {}: {}", win.render.path.display(), e));
+                }
             }
         }
-    }
+    });
+
     Ok(s)
 }
 

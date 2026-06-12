@@ -24,6 +24,7 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 - [x] **Live scan progress via Tauri events**: backend command `scan_folder` accepts `AppHandle` and forwards `ops::scan_library` log lines via `"scan-progress"` events. Frontend listens, parses log types, and presents a beautiful scrolling terminal logs modal with live-updating stat counters. (Fixed duplicates from React 18 Strict Mode double-mount listener races and nested-project recursive harvests. Scan is fully exitable, and minimizable to a background top banner on modal close).
 - [x] **Previews normalization fix**: Fixed unit test in the `previews` crate (where `v2` was incorrectly split into `v 2` and thus not filtered out as a version token).
 - [x] **GOTCHA (beach-ball incident)**: sync Tauri commands run on the MAIN thread -> scan froze the window. ALL commands now async; scan_folder additionally wraps work in tauri::async_runtime::spawn_blocking. Rule going forward: any command touching disk/db is async; anything heavy goes in spawn_blocking.
+- [x] **Multi-threaded scanning + preview processing** (2026-06-11): `scan_library` (`.als` decompression/XML parsing), `hunt_renders` (bulk preview scan), and `harvest_folder_renders` (in-folder preview harvest) all parallelized via `std::thread::scope`. Worker threads parse/decode on all CPU cores, results funnel to main thread for sequential SQLite writes. Expected ~6-8x speedup on multi-core machines.
 - [ ] **NEXT (user's test plan)**: dump db (`ableton-scan reset --yes`), bounce some current-year tracks into one folder, `scan` the matching projects + `previews` that folder, evaluate match quality from a controlled sample. NO full-system hunt (user explicitly declined).
 - [ ] Later in M3: previews in detail pane — list ALL of a set's previews, switch primary, manual attach/replace from the UI (user asked "what if i want to update the preview?": re-bounce to same path = auto-replaced on rescan via mtime; new file = new row, newest wins at equal confidence; `attach` = manual trump at 1.0 — UI affordance for all this still missing). Also: historical preview archive, in-app "hunt for previews" UI.
 - [ ] M4: in-app export worker (second Live install + UI automation queue).
@@ -95,6 +96,15 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 ## Backlog
 - [x] Automated Live export worker (second Live install + UI automation; see ARCHITECTURE.md Preview Service) [cmd + a to select all in arragement view, cmd + r then click export [or hit enter], but if there is no arrangement (usually there is so this is rare) like if nothing is there, or we are playing from session view then export some or all of the session view scences/rows]
 - [ ] Handle overwrite/replace dialogs gracefully during automated render queue exports (e.g. if file deletion fails or other conflicts occur)
+- [ ] **Naming consistency pass**: Many internal names are vague or inconsistent. Candidates:
+  - `hunt_renders` / `harvest_folder_renders` — "hunt" vs "harvest" for the same concept (matching audio files to sets). Consider unifying to one verb (e.g. `scan_previews` / `scan_folder_previews`, or `discover_*`).
+  - `previews` crate — does render discovery + name matching + peak extraction. Could be split or at least have its modules named more clearly (e.g. `matching.rs` → `name_matching.rs` or `render_matching.rs`).
+  - `ops` crate — generic name; consider `workflows` or `commands`.
+  - `ingest_set` / `upsert_preview` / `recompute_primary` — indexer functions mix abstraction levels; some are CRUD, some are workflow. Consider grouping or prefixing.
+  - `set_match_candidates` — unclear whether this returns sets or candidates for matching. Consider `preview_match_candidates`.
+  - `RenderFile` vs "preview" vs "render" — the codebase uses all three terms for the same concept (an audio file associated with a set). Pick one and be consistent.
+  - Tauri command names: `scan_folder` (scans projects), `scan_previews` (scans for audio matches) — from the user's perspective both are "scanning". Consider renaming to clarify what's being scanned.
+  - Frontend: verify component/function names align with the backend terminology once it's cleaned up.
 - [ ] Preview archive: keep historical previews per set, potentially anchored to Backup/ timestamps (stretch; pairs with --deep backup parsing)
 - [ ] Sample `evicted` state: detect iCloud `.icloud` placeholders vs truly missing files
 - [ ] `roots` table + `rescan` subcommand (refresh all previously scanned roots)
