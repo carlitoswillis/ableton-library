@@ -119,6 +119,25 @@ header h1 {
   color: var(--text);
 }
 
+/* Compact reset chip; only rendered when a filter is active, so it never
+   widens the default bar. */
+.filters .clear-filters {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--dim);
+  padding: 0 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.filters .clear-filters:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 .error {
   margin: 0 18px 10px;
   padding: 8px 12px;

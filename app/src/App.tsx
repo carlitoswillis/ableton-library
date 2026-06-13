@@ -148,6 +148,7 @@ export default function App() {
   const [listDrafts, setListDrafts] = useState<Record<number, string>>({}); // id -> edited name
   const [confirmDeleteList, setConfirmDeleteList] = useState<number | null>(null);
   const [modalNewList, setModalNewList] = useState("");
+  const [detailInList, setDetailInList] = useState(false); // star fill in the detail pane
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -205,6 +206,16 @@ export default function App() {
     invoke<ListInfo[]>("get_lists").then(setLists).catch((e) => setError(String(e)));
   }, []);
 
+  // Any filter switched off its default? Drives the Clear button.
+  const anyFilterActive =
+    !!text || !!minBpm || !!maxBpm || !!plugin || !!artist ||
+    !!listFilter || sortBy !== "modified" || !!dateModified || hasPreviewFilter !== "all";
+
+  const clearFilters = () => {
+    setText(""); setMinBpm(""); setMaxBpm(""); setPlugin(""); setArtist("");
+    setListFilter(""); setSortBy("modified"); setDateModified(""); setHasPreviewFilter("all");
+  };
+
   // Open the star popover for a set: position it next to the clicked star
   // (a fixed-position popup so the table/row never clips it), load memberships.
   const openListMenu = async (setId: number, anchor: HTMLElement) => {
@@ -224,6 +235,16 @@ export default function App() {
     }
   };
 
+  // Refresh the detail-pane star's fill (is the open set in any list?).
+  const refreshDetailInList = async (setId: number) => {
+    try {
+      const ids = await invoke<number[]>("lists_for_set", { set_id: setId });
+      setDetailInList(ids.length > 0);
+    } catch {
+      /* non-fatal */
+    }
+  };
+
   // Toggle a set's membership in a list from the popover.
   const toggleMembership = async (listId: number, setId: number, isMember: boolean) => {
     try {
@@ -236,6 +257,7 @@ export default function App() {
       });
       refreshLists();
       runSearch();
+      if (detail?.set_id === setId) refreshDetailInList(setId);
     } catch (e) {
       setError(String(e));
     }
@@ -251,6 +273,7 @@ export default function App() {
       setNewListName("");
       refreshLists();
       runSearch();
+      if (detail?.set_id === setId) refreshDetailInList(setId);
     } catch (e) {
       setError(String(e));
     }
@@ -819,6 +842,7 @@ export default function App() {
       // Prefill the artist editor with this set's OWN override (blank if it's
       // only inheriting the project's derived artist).
       setArtistDraft(d.artist_override ?? "");
+      refreshDetailInList(id);
       if (d.preview_missing) {
         setError("Note: The preview file was missing from disk and has been removed from the database.");
         runSearch();
@@ -1226,6 +1250,15 @@ export default function App() {
           <option value="yes">Has preview</option>
           <option value="no">No preview</option>
         </select>
+        {anyFilterActive && (
+          <button
+            className="clear-filters"
+            onClick={clearFilters}
+            title="Reset all filters to default"
+          >
+            ✕ Clear
+          </button>
+        )}
       </div>
 
       {error && <div className="error">{error}</div>}
@@ -1356,6 +1389,17 @@ export default function App() {
           <aside className="detail">
             <div className="detail-head">
               <h2>{fileName(detail.als_path).replace(/\.als$/, "")}</h2>
+              <button
+                title={detailInList ? "In a list — click to edit" : "Add to a list"}
+                onClick={(e) => openListMenu(detail.set_id, e.currentTarget as HTMLElement)}
+                style={{
+                  border: "none", background: "none", cursor: "pointer",
+                  fontSize: "1.3em", lineHeight: 1, marginLeft: "auto", padding: "0 6px",
+                  color: detailInList ? "var(--accent, #e6b800)" : "var(--muted, #888)",
+                }}
+              >
+                {detailInList ? "★" : "☆"}
+              </button>
               <button onClick={() => setDetail(null)}>×</button>
             </div>
             <div className="detail-actions">
