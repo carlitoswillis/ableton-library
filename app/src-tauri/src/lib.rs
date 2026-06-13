@@ -260,18 +260,15 @@ async fn sketch_preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
     let wav_path = cache_dir.join(wav_filename);
     
     if !wav_path.exists() {
-        let places = ops::places::get_ableton_places();
-        let parent_dir = als_path.parent().map(|p| p.to_path_buf());
-        
         let wav_path_clone = wav_path.clone();
+        let db_path = db_path().map_err(|e| e.to_string())?;
         tokio::task::spawn_blocking(move || {
             let mut log = |line| eprintln!("[sketch] {}", line);
             ops::sketch::render_sketch_file(
+                &db_path,
                 &als_path,
                 &wav_path_clone,
                 60.0,
-                parent_dir.as_deref(),
-                &places,
                 &mut log,
             )
         })
