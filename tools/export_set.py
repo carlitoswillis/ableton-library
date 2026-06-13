@@ -379,11 +379,13 @@ def main():
         # line-by-line by run_applescript — don't dump it twice.
         if is_permission_error(stderr) or is_permission_error(stdout):
             log(
-                "PERMISSION ERROR: macOS will not let this app send keystrokes. "
-                "Grant Accessibility access (System Settings -> Privacy & Security "
-                "-> Accessibility), enable the Ableton Library app (toggle it off/on "
-                "if it's already listed — a rebuild can silently invalidate the grant), "
-                "then re-enable Auto-Export. Halting queue.",
+                "PERMISSION ERROR: macOS will not let this process send keystrokes "
+                "(Accessibility). The grant attaches to whatever LAUNCHED the app, not "
+                "this script: if you run via `tauri dev` from a terminal, grant the "
+                "TERMINAL (iTerm/Terminal) Accessibility (System Settings -> Privacy & "
+                "Security -> Accessibility) — that's stable across rebuilds; if you run "
+                "a built .app, grant the app itself. Then re-enable Auto-Export. "
+                "Halting queue.",
                 is_error=True,
             )
             sys.exit(PERMISSION_EXIT_CODE)

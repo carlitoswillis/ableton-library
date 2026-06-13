@@ -734,7 +734,7 @@ async fn export_worker_loop(app: tauri::AppHandle) {
 
 /// Shown on a job and logged when automated rendering is blocked because macOS
 /// hasn't granted the app Accessibility permission (keystroke error 1002).
-const PERMISSION_ERROR_MSG: &str = "Automated rendering is blocked: macOS hasn't granted this app Accessibility permission, so it can't send keystrokes to drive Ableton Live.\n\nFix: System Settings → Privacy & Security → Accessibility → enable the Ableton Library app. If it's already listed, toggle it OFF and ON (rebuilding the app silently invalidates the grant). Then turn Auto-Export back on.\n\nThe queue has been paused so the rest of your jobs weren't burned.";
+const PERMISSION_ERROR_MSG: &str = "Automated rendering is blocked: macOS won't let this app send keystrokes to drive Ableton Live (Accessibility permission).\n\nThe grant attaches to whatever LAUNCHED the app, not the app binary itself:\n  • Dev build via `tauri dev` from a terminal → grant your TERMINAL (iTerm / Terminal) Accessibility. This is stable across rebuilds — do it once.\n  • A built .app launched by double-click → grant the app itself.\nSystem Settings → Privacy & Security → Accessibility → enable it (add with +, or toggle OFF/ON if already listed). Then turn Auto-Export back on.\n\nThe queue has been paused so the rest of your jobs weren't burned.";
 
 /// Index a folder of Ableton projects (incremental; harvests in-folder
 /// renders as previews). Same engine as `ableton-scan scan`.
