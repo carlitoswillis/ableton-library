@@ -268,7 +268,7 @@ async fn sketch_preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
                 &db_path,
                 &als_path,
                 &wav_path_clone,
-                60.0,
+                30.0,
                 &mut log,
             )
         })
