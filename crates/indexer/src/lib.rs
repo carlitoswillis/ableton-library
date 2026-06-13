@@ -1045,18 +1045,30 @@ pub fn list_artists(conn: &Connection) -> Result<Vec<(Option<String>, i64)>> {
 // ---- User lists (favorites + named collections) --------------------------
 
 /// Create a list (or return the existing one with that name — case-insensitive).
+/// Select-first instead of `ON CONFLICT`: an upsert's conflict target must match
+/// the index's collation, and ours is `name COLLATE NOCASE`, which makes
+/// `ON CONFLICT(name)` brittle across SQLite versions. This is unambiguous.
 pub fn create_list(conn: &Connection, name: &str) -> Result<i64> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM lists WHERE name = ?1 COLLATE NOCASE",
+            params![name],
+            |r| r.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
     conn.execute(
-        "INSERT INTO lists (name, created_at) VALUES (?1, ?2)
-         ON CONFLICT(name) DO NOTHING",
+        "INSERT INTO lists (name, created_at) VALUES (?1, ?2)",
         params![name, now],
     )?;
-    Ok(conn.query_row(
-        "SELECT id FROM lists WHERE name = ?1 COLLATE NOCASE",
-        params![name],
-        |r| r.get(0),
-    )?)
+    Ok(conn.last_insert_rowid())
 }
 
 /// Delete a list (its memberships cascade away).
@@ -1071,7 +1083,7 @@ pub fn rename_list(conn: &Connection, list_id: i64, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// All lists as (id, name, item_count), newest-used... actually by name.
+/// All lists as (id, name, item_count), ordered by name (case-insensitive).
 pub fn all_lists(conn: &Connection) -> Result<Vec<(i64, String, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT l.id, l.name, (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id)
