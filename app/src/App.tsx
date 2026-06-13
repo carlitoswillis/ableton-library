@@ -1198,33 +1198,33 @@ export default function App() {
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value)}
         >
-          <option value="modified">Recently Edited</option>
-          <option value="name">Alphabetical (A-Z)</option>
-          <option value="artist">Artist (A-Z)</option>
-          <option value="bpm">Tempo (BPM)</option>
-          <option value="previews">With Previews First</option>
+          <option value="modified">Recent</option>
+          <option value="name">Name A–Z</option>
+          <option value="artist">Artist A–Z</option>
+          <option value="bpm">Tempo</option>
+          <option value="previews">Previews first</option>
         </select>
         <select
           className="sort-select"
           value={dateModified}
           onChange={(e) => setDateModified(e.target.value)}
-          style={{ width: "135px" }}
+          style={{ width: "110px" }}
         >
-          <option value="">Any Time Created</option>
-          <option value="today">Created Today</option>
-          <option value="yesterday">Created Yesterday</option>
-          <option value="week">Created This Week</option>
-          <option value="month">Created This Month</option>
+          <option value="">Any date</option>
+          <option value="today">Today</option>
+          <option value="yesterday">Yesterday</option>
+          <option value="week">This week</option>
+          <option value="month">This month</option>
         </select>
         <select
           className="sort-select"
           value={hasPreviewFilter}
           onChange={(e) => setHasPreviewFilter(e.target.value)}
-          style={{ width: "135px" }}
+          style={{ width: "110px" }}
         >
-          <option value="all">All Previews</option>
-          <option value="yes">Has Preview</option>
-          <option value="no">No Preview</option>
+          <option value="all">Any preview</option>
+          <option value="yes">Has preview</option>
+          <option value="no">No preview</option>
         </select>
       </div>
 
