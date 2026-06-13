@@ -966,7 +966,6 @@ export default function App() {
         return (
           <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
             <button className="play-btn sketch" title="Play sketch preview" onClick={(e) => { e.stopPropagation(); playPreview(hit); }}>▶ Preview</button>
-            <button className="play-btn" style={{ borderColor: "var(--border)", color: "var(--dim)", fontSize: "11px", padding: "3px 6px" }} onClick={(e) => { e.stopPropagation(); addToQueue(hit.set_id); }} title="Re-render/update audio preview">Update ↻</button>
             <button className="open-btn" title="Open in Ableton Live" onClick={(e) => { e.stopPropagation(); openInLive(hit.set_id); }}>Open</button>
           </div>
         );

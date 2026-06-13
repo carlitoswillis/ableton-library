@@ -749,7 +749,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
                                             AND d.name LIKE '%' || ?4 || '%'))
                AND (?5 IS NULL OR s.mtime >= ?5)
                AND (?6 IS NULL OR p.last_scanned >= ?6)
-               AND (?7 IS NULL OR ?7 = 'all' OR (?7 = 'yes' AND pv.audio_path IS NOT NULL) OR (?7 = 'no' AND pv.audio_path IS NULL))
+               AND (?7 IS NULL OR ?7 = 'all' OR (?7 = 'yes' AND pv.audio_path IS NOT NULL AND pv.source != 'sketch') OR (?7 = 'no' AND (pv.audio_path IS NULL OR pv.source = 'sketch')))
                AND (?8 IS NULL OR COALESCE(s.artist_override, p.artist) LIKE '%' || ?8 || '%')
                AND (?9 IS NULL OR EXISTS (SELECT 1 FROM list_items li2
                                           WHERE li2.als_path = s.als_path AND li2.list_id = ?9))
@@ -773,7 +773,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
                                             AND d.name LIKE '%' || ?4 || '%'))
                AND (?5 IS NULL OR s.mtime >= ?5)
                AND (?6 IS NULL OR p.last_scanned >= ?6)
-               AND (?7 IS NULL OR ?7 = 'all' OR (?7 = 'yes' AND pv.audio_path IS NOT NULL) OR (?7 = 'no' AND pv.audio_path IS NULL))
+               AND (?7 IS NULL OR ?7 = 'all' OR (?7 = 'yes' AND pv.audio_path IS NOT NULL AND pv.source != 'sketch') OR (?7 = 'no' AND (pv.audio_path IS NULL OR pv.source = 'sketch')))
                AND (?8 IS NULL OR COALESCE(s.artist_override, p.artist) LIKE '%' || ?8 || '%')
                AND (?9 IS NULL OR EXISTS (SELECT 1 FROM list_items li2
                                           WHERE li2.als_path = s.als_path AND li2.list_id = ?9))
