@@ -650,14 +650,59 @@ pub struct SearchHit {
     pub in_list: bool,
 }
 
+/// Turn raw user search text into a SAFE FTS5 MATCH query.
+///
+/// User input was previously fed straight to FTS5, where characters like
+/// `.`, `-`, `(`, `:`, `*`, `^` and `"` are QUERY OPERATORS — so typing
+/// `131.10` made FTS5 read `.` as a column filter and raise
+/// `fts5: syntax error near "."`. Library names are full of these
+/// (`be 131.10 bpm`, `2 113.10 bpm`, `tisa - taco bell`, `nasty (prod…)`).
+///
+/// Strategy: pull out alphanumeric tokens only (the unicode61 tokenizer already
+/// splits on punctuation at INDEX time, so dropping it here matches what's
+/// actually stored — `131.10` is indexed as the tokens `131` + `10`), wrap each
+/// token in double quotes to neutralise every special char, and append `*` for
+/// prefix matching (preserves the as-you-type feel). Tokens are space-joined,
+/// i.e. implicit AND. Returns `None` when the input yields no usable token
+/// (e.g. all punctuation) so the caller skips the text filter entirely instead
+/// of issuing an empty or invalid MATCH.
+fn fts_query(raw: &str) -> Option<String> {
+    let mut terms: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in raw.chars() {
+        if ch.is_alphanumeric() {
+            cur.push(ch);
+        } else if !cur.is_empty() {
+            terms.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        terms.push(cur);
+    }
+    if terms.is_empty() {
+        return None;
+    }
+    Some(
+        terms
+            .iter()
+            .map(|t| format!("\"{t}\"*"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
 pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
+    // Sanitize free-text into a safe FTS5 query up front; everything below keys
+    // off `fts` (not the raw text) so punctuation-only input cleanly degrades to
+    // "no text filter" instead of erroring.
+    let fts = o.text.as_deref().and_then(fts_query);
     let order_by = match o.sort_by.as_deref() {
         Some("modified") => "s.mtime DESC, p.name, s.als_path",
         Some("bpm") => "s.tempo DESC, p.name, s.als_path",
         Some("artist") => "COALESCE(s.artist_override, p.artist) IS NULL, COALESCE(s.artist_override, p.artist), p.name, s.als_path",
         Some("previews") => "pv.audio_path IS NULL, p.name, s.als_path",
         _ => {
-            if o.text.is_some() {
+            if fts.is_some() {
                 "bm25(f.search, 0.0, 8.0, 10.0, 4.0, 1.0, 0.5), p.name, s.als_path"
             } else {
                 "p.name, s.als_path"
@@ -683,7 +728,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
     };
     let scanned_bound_str = scanned_bound.map(|dt| dt.format("%Y-%m-%dT%H:%M:%S+00:00").to_string());
 
-    let sql = if o.text.is_some() {
+    let sql = if fts.is_some() {
         format!(
             "SELECT s.id, p.name, s.als_path, s.tempo, s.tempos_json, s.time_signature, s.live_version,
                     pv.audio_path, pv.duration, COALESCE(s.artist_override, p.artist),
@@ -734,7 +779,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
         params![
-            o.text,
+            fts,
             o.min_bpm,
             o.max_bpm,
             o.plugin,
@@ -1555,6 +1600,50 @@ mod tests {
         assert_eq!(artists.len(), 2);
         assert_eq!(artists[0], (Some("Burial".to_string()), 1));
         assert_eq!(artists[1], (None, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn test_fts_query_sanitization() {
+        // Punctuation that FTS5 treats as operators is neutralised; tokens get
+        // quoted + prefixed.
+        assert_eq!(fts_query("131.10").as_deref(), Some("\"131\"* \"10\"*"));
+        assert_eq!(fts_query("tisa - taco").as_deref(), Some("\"tisa\"* \"taco\"*"));
+        assert_eq!(fts_query("nasty (prod)").as_deref(), Some("\"nasty\"* \"prod\"*"));
+        assert_eq!(fts_query("foo").as_deref(), Some("\"foo\"*"));
+        // No usable tokens -> None (caller skips the text filter entirely).
+        assert_eq!(fts_query("..."), None);
+        assert_eq!(fts_query("   "), None);
+        assert_eq!(fts_query(""), None);
+    }
+
+    #[test]
+    fn test_search_with_period_in_query() -> Result<()> {
+        let conn = fresh_db()?;
+        let now = "2026-06-13T00:00:00+00:00";
+        let pid = upsert_project(&conn, "/lib/2019/be", "be 131.10 bpm", None, now)?;
+        conn.execute(
+            "INSERT INTO sets (id, project_id, als_path, file_size, mtime, content_hash, warnings)
+             VALUES (1, ?1, '/lib/2019/be/be.als', 100, ?2, 'h', '[]')",
+            params![pid, now],
+        )?;
+        conn.execute(
+            "INSERT INTO search (set_id, project_name, set_name, track_names, device_names, sample_names)
+             VALUES (1, 'be 131.10 bpm', 'be 131.10 bpm', '', '', '')",
+            [],
+        )?;
+
+        // Previously raised `fts5: syntax error near "."`.
+        let mut o = opts(None);
+        o.text = Some("131.10".to_string());
+        let hits = search(&conn, &o)?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].project, "be 131.10 bpm");
+
+        // A bare period (or any all-punctuation input) must not error and must
+        // degrade to "no text filter" rather than matching nothing-by-syntax.
+        o.text = Some(".".to_string());
+        assert!(search(&conn, &o).is_ok());
         Ok(())
     }
 
