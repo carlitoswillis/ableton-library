@@ -76,7 +76,7 @@ def parse_set(als_path):
                 stack.append(tag)
                 if tag in TRACK_TAGS and len(stack) >= 2 and stack[-2] == "Tracks":
                     tracks.append({"mute": False, "solo": False, "kind": tag,
-                                   "name": None, "parts": []})
+                                   "name": None, "parts": [], "vol": 1.0})
                     cur_track = len(tracks) - 1
                 if tag in ("MasterTrack", "MainTrack"):
                     ctx_master += 1
@@ -163,6 +163,13 @@ def parse_set(als_path):
                         and stack[-3] == "DeviceChain" and stack[-4] in TRACK_TAGS:
                     if cur_track is not None and _v(el) == "true":
                         tracks[cur_track]["solo"] = True
+                # track mixer Volume (linear gain, 1.0 = 0 dB) — mirrors the
+                # user's level/mixing choices into the sketch.
+                if tag == "Manual" and len(stack) >= 5 and stack[-2] == "Volume" \
+                        and stack[-3] == "Mixer" and stack[-4] == "DeviceChain" \
+                        and stack[-5] in TRACK_TAGS and cur_track is not None:
+                    try: tracks[cur_track]["vol"] = float(_v(el))
+                    except (TypeError, ValueError): pass
                 # track name: Track > Name > EffectiveName
                 if tag == "EffectiveName" and len(stack) >= 3 and stack[-2] == "Name" \
                         and stack[-3] in TRACK_TAGS and cur_track is not None \
@@ -453,33 +460,6 @@ def midi_note_positions(clip):
     return out
 
 
-def detect_pitch_midi(mono, sr, fmin=24.0, fmax=260.0):
-    """Estimate a low-end fundamental (autocorrelation) and return it as a
-    fractional MIDI note, or None if there's no confident pitch.
-
-    For 808s specifically: an 808 is a BASS instrument, so its pitch matters and
-    the sample is often mislabeled / detuned relative to its RootKey. Detecting
-    the true fundamental lets us treat THAT as the root, so notes play in tune.
-    """
-    x = np.asarray(mono, dtype=np.float64)
-    if x.size < sr // 20:
-        return None
-    x = x[: int(sr * 0.6)]                  # body of the hit
-    x = x - x.mean()
-    if np.sqrt(np.mean(x * x)) < 1e-4:
-        return None
-    corr = np.correlate(x, x, mode="full")[x.size - 1:]
-    lag_min, lag_max = int(sr / fmax), int(sr / fmin)
-    if lag_max <= lag_min or lag_max >= corr.size:
-        return None
-    seg = corr[lag_min:lag_max]
-    lag = lag_min + int(np.argmax(seg))
-    if corr[0] <= 0 or corr[lag] / corr[0] < 0.3:   # weak periodicity -> bail
-        return None
-    f0 = sr / lag
-    return 69.0 + 12.0 * np.log2(f0 / 440.0)
-
-
 def pitch_resample(audio, semitones):
     """Repitch by playback-rate change (like Simpler's Classic mode): up =
     faster + shorter. Linear interpolation; cheap enough to cache per pitch."""
@@ -541,6 +521,28 @@ def _audible_clips(items, audible):
     return out, muted, disabled
 
 
+def resolve_overlaps(items):
+    """A DAW track plays ONE clip at a time. Truncate each clip at the next
+    clip's start on the same track, so stacked/duplicate (take-lane / comp)
+    clips don't double-trigger and smear the groove. Sets `eff_end` on each
+    item; returns how many were truncated."""
+    by_track, truncated = {}, 0
+    for i, c in enumerate(items):
+        c["_idx"] = i
+        if c["track"] is None:
+            c["eff_end"] = c["end"]
+        else:
+            by_track.setdefault(c["track"], []).append(c)
+    for grp in by_track.values():
+        grp.sort(key=lambda c: (c["start"], c["_idx"]))
+        for j, c in enumerate(grp):
+            nxt = grp[j + 1] if j + 1 < len(grp) else None
+            c["eff_end"] = min(c["end"], nxt["start"]) if nxt else c["end"]
+            if c["eff_end"] < c["end"] - 1e-6:
+                truncated += 1
+    return truncated
+
+
 def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0,
            library_root=None, verbose=True):
     project_dir = os.path.dirname(os.path.abspath(als_path))
@@ -557,6 +559,10 @@ def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0,
     if not clips and not midi_clips:
         print("Nothing audible to render (all clips muted/disabled, or empty set).")
         return None
+
+    # DAW grid: one clip per track at a time (kills doubled/take-lane overlaps).
+    a_trunc = resolve_overlaps(clips)
+    m_trunc = resolve_overlaps(midi_clips)
 
     ends = [c["end"] for c in clips] + [m["end"] for m in midi_clips]
     timeline_end = max(ends) if ends else 0.0
@@ -586,14 +592,17 @@ def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0,
             continue
 
         start_sec = c["start"] * spb
-        dur_sec = max(0.0, (c["end"] - c["start"]) * spb)
+        dur_sec = max(0.0, (c["eff_end"] - c["start"]) * spb)
+        if dur_sec <= 0:
+            continue
         off_sec = content_offset_sec(c, bpm)
 
+        tvol = tracks[c["track"]]["vol"] if (c["track"] is not None and c["track"] < len(tracks)) else 1.0
         s0 = int(off_sec * target_sr)
         seg = audio[s0:s0 + int(dur_sec * target_sr)]
         if seg.shape[0] == 0:
             continue
-        seg = seg * float(c.get("sample_volume", 1.0))
+        seg = seg * (float(c.get("sample_volume", 1.0)) * tvol)
 
         # linear fades (clip fade lengths are in beats)
         fi = int(c["fade_in"] * spb * target_sr)
@@ -616,22 +625,6 @@ def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0,
     #     true synth instruments (Analog/Operator/3rd-party) with no sample. ---
     inst_base_cache, pitch_cache = {}, {}
 
-    # 808 auto-tune: an 808 is bass, so pitch matters and the sample is often
-    # detuned vs its RootKey. For 808-named tracks, detect the sample's true
-    # fundamental and treat THAT as the root so notes land in tune.
-    tuned = 0
-    for t in tracks:
-        if "808" not in (t["name"] or "").lower():
-            continue
-        for p in t["parts"]:
-            base = instrument_base(p, project_dir, sample_index, inst_base_cache)
-            if base is None:
-                continue
-            m = detect_pitch_midi(base.mean(axis=1), target_sr)
-            if m is not None and abs(m - p["root"]) >= 0.5:
-                p["root"] = int(round(m))
-                tuned += 1
-
     def place_mono(sig, at):
         if sig is None or at >= mix.shape[0]:
             return False
@@ -651,12 +644,16 @@ def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0,
         track = tracks[ti] if (ti is not None and ti < len(tracks)) else None
         parts = track["parts"] if track else []
         kind = synth_kind(track["name"] if track else None)
+        tvol = track["vol"] if track else 1.0
+        eff_end = m["eff_end"]
         for (ab, dur_b, pitch, vel) in midi_note_positions(m):
+            if ab >= eff_end:        # clip truncated by the next clip (DAW grid)
+                continue
             start_sec = ab * spb
             if max_seconds and start_sec >= max_seconds:
                 continue
             at = int(start_sec * target_sr)
-            vgain = (vel / 127.0) * 0.6
+            vgain = (vel / 127.0) * 0.6 * tvol
             matched = [p for p in parts if p["key_min"] <= pitch <= p["key_max"]]
             voiced = False
             for p in matched:
@@ -692,10 +689,11 @@ def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0,
     print(f"\n{os.path.basename(als_path)}")
     print(f"  tempo={bpm:.2f}  tracks={len(tracks)} (muted={n_muted}, solo={'yes' if any_solo else 'no'})")
     print(f"  audio: kept={len(clips)} placed={placed} (dropped muted={a_muted} "
-          f"disabled={a_disabled} missing={missing} undecodable={undecodable})")
+          f"disabled={a_disabled} missing={missing} undecodable={undecodable}; overlap-trimmed={a_trunc})")
     print(f"  midi:  clips={len(midi_clips)} notes={notes_played} "
           f"(real-sample={sample_notes} synth-fallback={synth_notes}; "
-          f"808-tuned={tuned}; dropped muted={m_muted} disabled={m_disabled})")
+          f"dropped muted={m_muted} disabled={m_disabled}; overlap-trimmed={m_trunc})")
+    print(f"  levels: track mixer volumes applied (mirrors mix)")
     print(f"  out={mix.shape[0]/target_sr:.1f}s (cap {max_seconds:.0f}s)  peak={peak:.3f} rms={rms:.4f}")
     print(f"  -> {out_path}")
     return out_path
