@@ -65,6 +65,8 @@ def parse_set(als_path):
     cur = None          # audio clip accumulator
     mc = None           # midi clip accumulator
     kt = None           # current KeyTrack: {"key":int|None, "notes":[...]}
+    part = None         # current Simpler MultiSamplePart accumulator
+    in_keyrange = 0
     in_loop = in_fileref = in_fades = 0
 
     with gzip.open(als_path, "rb") as fh:
@@ -73,7 +75,8 @@ def parse_set(als_path):
             if ev == "start":
                 stack.append(tag)
                 if tag in TRACK_TAGS and len(stack) >= 2 and stack[-2] == "Tracks":
-                    tracks.append({"mute": False, "solo": False, "kind": tag, "name": None})
+                    tracks.append({"mute": False, "solo": False, "kind": tag,
+                                   "name": None, "parts": []})
                     cur_track = len(tracks) - 1
                 if tag in ("MasterTrack", "MainTrack"):
                     ctx_master += 1
@@ -118,6 +121,37 @@ def parse_set(als_path):
                 if tag == "MidiKey" and kt is not None:
                     try: kt["key"] = int(float(_v(el)))
                     except (TypeError, ValueError): pass
+
+                # instrument sample map (Simpler/Sampler MultiSamplePart) — the
+                # REAL sample a MIDI track plays. Captured per track so notes
+                # trigger the actual drum/instrument sample, not a synth.
+                if tag == "MultiSamplePart" and cur_track is not None:
+                    part = {"key_min": 0, "key_max": 127, "root": 60,
+                            "sstart": 0, "send": None, "path": None, "rel": None}
+                elif tag == "KeyRange" and part is not None:
+                    in_keyrange += 1
+                if part is not None:
+                    if tag == "RootKey" and len(stack) >= 2 and stack[-2] == "MultiSamplePart":
+                        try: part["root"] = int(float(_v(el)))
+                        except (TypeError, ValueError): pass
+                    elif tag == "SampleStart" and _v(el) is not None \
+                            and len(stack) >= 2 and stack[-2] == "MultiSamplePart":
+                        try: part["sstart"] = int(float(_v(el)))
+                        except (TypeError, ValueError): pass
+                    elif tag == "SampleEnd" and _v(el) is not None \
+                            and len(stack) >= 2 and stack[-2] == "MultiSamplePart":
+                        try: part["send"] = int(float(_v(el)))
+                        except (TypeError, ValueError): pass
+                    elif in_keyrange and tag == "Min":
+                        try: part["key_min"] = int(float(_v(el)))
+                        except (TypeError, ValueError): pass
+                    elif in_keyrange and tag == "Max":
+                        try: part["key_max"] = int(float(_v(el)))
+                        except (TypeError, ValueError): pass
+                    elif in_fileref and tag == "Path" and not part["path"] and _v(el):
+                        part["path"] = _v(el)
+                    elif in_fileref and tag == "RelativePath" and not part["rel"] and _v(el):
+                        part["rel"] = _v(el)
 
                 # track-level mute / solo (path-qualified to the track mixer)
                 if tag == "Manual" and len(stack) >= 5 and stack[-2] == "Speaker" \
@@ -192,6 +226,12 @@ def parse_set(als_path):
                     in_fileref = max(0, in_fileref - 1)
                 elif tag == "Fades":
                     in_fades = max(0, in_fades - 1)
+                elif tag == "KeyRange" and part is not None:
+                    in_keyrange = max(0, in_keyrange - 1)
+                elif tag == "MultiSamplePart" and part is not None:
+                    if (part["path"] or part["rel"]) and cur_track is not None:
+                        tracks[cur_track]["parts"].append(part)
+                    part = None
                 elif tag == "KeyTrack" and kt is not None:
                     if kt["key"] is not None:
                         for (t, d, v) in kt["notes"]:
@@ -280,21 +320,45 @@ def to_stereo_sr(audio, sr, target_sr=OUT_SR):
 
 
 # ------------------------------------------------------------------ rendering
-def resolve_sample(clip, project_dir):
-    """Find the real audio file: absolute Path, else project_dir/RelativePath."""
-    p = clip.get("path")
-    if p and os.path.exists(p):
-        return p
-    rel = clip.get("rel_path")
+def build_sample_index(root, _cache={}):
+    """basename(lower) -> full path, over the whole library root. Mirrors the
+    exporter's cross-project relink: a sample may live in ANOTHER project's
+    folder. Built once per root (cached)."""
+    if root in _cache:
+        return _cache[root]
+    idx = {}
+    if root and os.path.isdir(root):
+        for dp, _d, files in os.walk(root):
+            if "/Backup" in dp:
+                continue
+            for f in files:
+                if f.lower().endswith(AUDIO_EXTS):
+                    idx.setdefault(f.lower(), os.path.join(dp, f))
+    _cache[root] = idx
+    return idx
+
+
+def resolve_sample(path_abs, rel, project_dir, index=None):
+    """Resolve to a real file: absolute Path -> project/RelativePath ->
+    library-wide basename (relink) -> walk project dir."""
+    if path_abs and os.path.exists(path_abs):
+        return path_abs
+    base = None
     if rel:
-        cand = os.path.join(project_dir, rel)
+        cand = os.path.normpath(os.path.join(project_dir, rel))
         if os.path.exists(cand):
             return cand
-        # also try basename anywhere under project_dir (moved sample)
         base = os.path.basename(rel)
-        for root, _dirs, files in os.walk(project_dir):
+    if not base and path_abs:
+        base = os.path.basename(path_abs)
+    if base:
+        if index is not None:
+            hit = index.get(base.lower())
+            if hit:
+                return hit
+        for dp, _d, files in os.walk(project_dir):
             if base in files:
-                return os.path.join(root, base)
+                return os.path.join(dp, base)
     return None
 
 
@@ -389,6 +453,81 @@ def midi_note_positions(clip):
     return out
 
 
+def detect_pitch_midi(mono, sr, fmin=24.0, fmax=260.0):
+    """Estimate a low-end fundamental (autocorrelation) and return it as a
+    fractional MIDI note, or None if there's no confident pitch.
+
+    For 808s specifically: an 808 is a BASS instrument, so its pitch matters and
+    the sample is often mislabeled / detuned relative to its RootKey. Detecting
+    the true fundamental lets us treat THAT as the root, so notes play in tune.
+    """
+    x = np.asarray(mono, dtype=np.float64)
+    if x.size < sr // 20:
+        return None
+    x = x[: int(sr * 0.6)]                  # body of the hit
+    x = x - x.mean()
+    if np.sqrt(np.mean(x * x)) < 1e-4:
+        return None
+    corr = np.correlate(x, x, mode="full")[x.size - 1:]
+    lag_min, lag_max = int(sr / fmax), int(sr / fmin)
+    if lag_max <= lag_min or lag_max >= corr.size:
+        return None
+    seg = corr[lag_min:lag_max]
+    lag = lag_min + int(np.argmax(seg))
+    if corr[0] <= 0 or corr[lag] / corr[0] < 0.3:   # weak periodicity -> bail
+        return None
+    f0 = sr / lag
+    return 69.0 + 12.0 * np.log2(f0 / 440.0)
+
+
+def pitch_resample(audio, semitones):
+    """Repitch by playback-rate change (like Simpler's Classic mode): up =
+    faster + shorter. Linear interpolation; cheap enough to cache per pitch."""
+    if semitones == 0:
+        return audio
+    ratio = 2.0 ** (semitones / 12.0)
+    n = audio.shape[0]
+    new_n = max(1, int(round(n / ratio)))
+    idx = np.linspace(0.0, n - 1, new_n)
+    base = np.arange(n)
+    return np.stack([np.interp(idx, base, audio[:, c])
+                     for c in range(audio.shape[1])], axis=1).astype(np.float32)
+
+
+def instrument_base(part, project_dir, index, cache):
+    """Decode + slice [SampleStart:SampleEnd] + resample to OUT_SR (cached)."""
+    key = (part["path"], part["rel"], part["sstart"], part["send"])
+    if key in cache:
+        return cache[key]
+    path = resolve_sample(part["path"], part["rel"], project_dir, index)
+    audio = None
+    if path:
+        try:
+            a, sr = load_audio(path)
+            s = max(0, part["sstart"] or 0)
+            e = part["send"] if part["send"] else a.shape[0]
+            e = min(e, a.shape[0])
+            if e <= s:
+                e = a.shape[0]
+            audio = to_stereo_sr(a[s:e], sr, OUT_SR)
+        except Exception:
+            audio = None
+    cache[key] = audio
+    return audio
+
+
+def instrument_voice(part, pitch, project_dir, index, base_cache, pitch_cache):
+    """The instrument's sample, repitched for `pitch` (cached per semitone)."""
+    semi = pitch - part["root"]
+    key = (part["path"], part["rel"], part["sstart"], part["send"], semi)
+    if key in pitch_cache:
+        return pitch_cache[key]
+    base = instrument_base(part, project_dir, index, base_cache)
+    v = None if base is None else pitch_resample(base, semi)
+    pitch_cache[key] = v
+    return v
+
+
 def _audible_clips(items, audible):
     """Drop disabled clips and clips on muted/non-solo'd tracks."""
     kept = muted = disabled = 0
@@ -402,8 +541,12 @@ def _audible_clips(items, audible):
     return out, muted, disabled
 
 
-def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0, verbose=True):
+def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0,
+           library_root=None, verbose=True):
     project_dir = os.path.dirname(os.path.abspath(als_path))
+    if library_root is None:
+        library_root = os.path.dirname(project_dir)  # sibling projects
+    sample_index = build_sample_index(library_root)
     bpm, clips, tracks, midi_clips = parse_set(als_path)
     spb = 60.0 / bpm  # seconds per beat
 
@@ -428,7 +571,7 @@ def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0, verbose=True)
     for c in clips:
         if max_seconds and c["start"] * spb >= max_seconds:
             continue
-        path = resolve_sample(c, project_dir)
+        path = resolve_sample(c.get("path"), c.get("rel_path"), project_dir, sample_index)
         if not path:
             missing += 1
             continue
@@ -468,27 +611,66 @@ def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0, verbose=True)
         mix[at:end] += seg
         placed += 1
 
-    # --- MIDI clips -> generic synth ---
-    notes_played = 0
+    # --- MIDI clips: trigger the track's REAL instrument sample per note
+    #     (relinked library-wide); fall back to the generic synth only for
+    #     true synth instruments (Analog/Operator/3rd-party) with no sample. ---
+    inst_base_cache, pitch_cache = {}, {}
+
+    # 808 auto-tune: an 808 is bass, so pitch matters and the sample is often
+    # detuned vs its RootKey. For 808-named tracks, detect the sample's true
+    # fundamental and treat THAT as the root so notes land in tune.
+    tuned = 0
+    for t in tracks:
+        if "808" not in (t["name"] or "").lower():
+            continue
+        for p in t["parts"]:
+            base = instrument_base(p, project_dir, sample_index, inst_base_cache)
+            if base is None:
+                continue
+            m = detect_pitch_midi(base.mean(axis=1), target_sr)
+            if m is not None and abs(m - p["root"]) >= 0.5:
+                p["root"] = int(round(m))
+                tuned += 1
+
+    def place_mono(sig, at):
+        if sig is None or at >= mix.shape[0]:
+            return False
+        end = min(at + sig.shape[0], mix.shape[0])
+        ncols = sig.shape[1] if sig.ndim == 2 else 1
+        seg = sig[:end - at]
+        if seg.ndim == 2:
+            mix[at:end] += seg
+        else:
+            mix[at:end, 0] += seg
+            mix[at:end, 1] += seg
+        return True
+
+    sample_notes = synth_notes = 0
     for m in midi_clips:
         ti = m["track"]
-        kind = synth_kind(tracks[ti]["name"] if (ti is not None and ti < len(tracks)) else None)
+        track = tracks[ti] if (ti is not None and ti < len(tracks)) else None
+        parts = track["parts"] if track else []
+        kind = synth_kind(track["name"] if track else None)
         for (ab, dur_b, pitch, vel) in midi_note_positions(m):
             start_sec = ab * spb
             if max_seconds and start_sec >= max_seconds:
                 continue
-            freq = 440.0 * (2.0 ** ((pitch - 69) / 12.0))
-            voice = synth_note(freq, dur_b * spb, vel, kind, target_sr)
-            if voice is None:
-                continue
             at = int(start_sec * target_sr)
-            if at >= mix.shape[0]:
-                continue
-            end = min(at + voice.shape[0], mix.shape[0])
-            v = voice[:end - at]
-            mix[at:end, 0] += v
-            mix[at:end, 1] += v
-            notes_played += 1
+            vgain = (vel / 127.0) * 0.6
+            matched = [p for p in parts if p["key_min"] <= pitch <= p["key_max"]]
+            voiced = False
+            for p in matched:
+                v = instrument_voice(p, pitch, project_dir, sample_index,
+                                     inst_base_cache, pitch_cache)
+                if v is not None and place_mono(v * vgain, at):
+                    voiced = True
+            if voiced:
+                sample_notes += 1
+            else:
+                freq = 440.0 * (2.0 ** ((pitch - 69) / 12.0))
+                if place_mono(synth_note(freq, dur_b * spb, vel, kind, target_sr), at):
+                    synth_notes += 1
+    notes_played = sample_notes + synth_notes
 
     # normalize to -1.5 dBFS peak
     peak = float(np.max(np.abs(mix))) if mix.size else 0.0
@@ -511,8 +693,9 @@ def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0, verbose=True)
     print(f"  tempo={bpm:.2f}  tracks={len(tracks)} (muted={n_muted}, solo={'yes' if any_solo else 'no'})")
     print(f"  audio: kept={len(clips)} placed={placed} (dropped muted={a_muted} "
           f"disabled={a_disabled} missing={missing} undecodable={undecodable})")
-    print(f"  midi:  clips={len(midi_clips)} notes_voiced={notes_played} "
-          f"(dropped muted={m_muted} disabled={m_disabled})")
+    print(f"  midi:  clips={len(midi_clips)} notes={notes_played} "
+          f"(real-sample={sample_notes} synth-fallback={synth_notes}; "
+          f"808-tuned={tuned}; dropped muted={m_muted} disabled={m_disabled})")
     print(f"  out={mix.shape[0]/target_sr:.1f}s (cap {max_seconds:.0f}s)  peak={peak:.3f} rms={rms:.4f}")
     print(f"  -> {out_path}")
     return out_path
@@ -524,5 +707,8 @@ if __name__ == "__main__":
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--max-seconds", type=float, default=60.0,
                     help="cap preview length (0 = full song)")
+    ap.add_argument("--library-root", default=None,
+                    help="root to relink samples across (default: project's parent)")
     args = ap.parse_args()
-    render(args.als, args.out, max_seconds=args.max_seconds)
+    render(args.als, args.out, max_seconds=args.max_seconds,
+           library_root=args.library_root)
