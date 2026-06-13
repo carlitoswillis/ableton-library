@@ -1143,37 +1143,37 @@ export default function App() {
 
       <div className="filters">
         <input
-          className="grow"
+          className={`grow${text ? " active" : ""}`}
           placeholder="Search projects, sets, tracks, devices, samples…"
           value={text}
           onChange={(e) => setText(e.target.value)}
         />
         <input
-          className="bpm"
+          className={`bpm${minBpm ? " active" : ""}`}
           placeholder="min bpm"
           value={minBpm}
           onChange={(e) => setMinBpm(e.target.value)}
         />
         <input
-          className="bpm"
+          className={`bpm${maxBpm ? " active" : ""}`}
           placeholder="max bpm"
           value={maxBpm}
           onChange={(e) => setMaxBpm(e.target.value)}
         />
         <input
-          className="plugin"
+          className={`plugin${plugin ? " active" : ""}`}
           placeholder="plugin…"
           value={plugin}
           onChange={(e) => setPlugin(e.target.value)}
         />
         <input
-          className="plugin"
+          className={`plugin${artist ? " active" : ""}`}
           placeholder="artist…"
           value={artist}
           onChange={(e) => setArtist(e.target.value)}
         />
         <select
-          className="sort-select"
+          className={`sort-select${listFilter ? " active" : ""}`}
           value={listFilter}
           onChange={(e) => setListFilter(e.target.value)}
           title="Show only sets in a list"
@@ -1194,7 +1194,7 @@ export default function App() {
           </button>
         )}
         <select
-          className="sort-select"
+          className={`sort-select${sortBy !== "modified" ? " active" : ""}`}
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value)}
         >
@@ -1205,7 +1205,7 @@ export default function App() {
           <option value="previews">Previews first</option>
         </select>
         <select
-          className="sort-select"
+          className={`sort-select${dateModified ? " active" : ""}`}
           value={dateModified}
           onChange={(e) => setDateModified(e.target.value)}
           style={{ width: "110px" }}
@@ -1217,7 +1217,7 @@ export default function App() {
           <option value="month">This month</option>
         </select>
         <select
-          className="sort-select"
+          className={`sort-select${hasPreviewFilter !== "all" ? " active" : ""}`}
           value={hasPreviewFilter}
           onChange={(e) => setHasPreviewFilter(e.target.value)}
           style={{ width: "110px" }}
