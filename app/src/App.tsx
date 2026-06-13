@@ -914,7 +914,7 @@ export default function App() {
         openDetail(setId);
         runSearch();
         refreshStats();
-        setError("Note: Audio preview has been removed.");
+        setError("Note: Preview unlinked — your audio file was kept on disk.");
       }
     } catch (e) {
       setError(String(e));
@@ -1104,6 +1104,31 @@ export default function App() {
       setError(String(e));
       runSearch();
       refreshStats();
+    }
+  };
+
+  // Play the open set's current primary preview (detail pane).
+  const playDetailPreview = async () => {
+    if (!detail) return;
+    try {
+      setError(null);
+      const p = await invoke<PreviewInfo | null>("preview", { set_id: detail.set_id });
+      if (!p) {
+        setError("No preview for this set yet.");
+        return;
+      }
+      setTrack({
+        setId: detail.set_id,
+        title: fileName(detail.als_path).replace(/\.als$/, ""),
+        subtitle:
+          `${detail.project} · ${p.source}` +
+          (p.confidence < 0.85 ? ` (${Math.round(p.confidence * 100)}% match)` : ""),
+        src: convertFileSrc(p.audio_path),
+        peaks: p.peaks,
+        duration: p.duration,
+      });
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -1504,11 +1529,6 @@ export default function App() {
                   );
                 }
               })()}
-              {detail.has_preview && (
-                <button className="open-btn danger-btn" onClick={() => removePreview(detail.set_id)}>
-                  Remove Preview
-                </button>
-              )}
             </div>
             <p className="meta">
               {detail.project}
@@ -1536,6 +1556,25 @@ export default function App() {
                 </span>
               )}
             </div>
+            {detail.has_preview && detail.preview_path && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "2px 0 10px" }}>
+                <span style={{ opacity: 0.7 }}>Preview:</span>
+                <button className="open-btn" onClick={playDetailPreview} title="Play preview">▶</button>
+                <span
+                  title={detail.preview_path}
+                  style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                >
+                  {fileName(detail.preview_path)}
+                </span>
+                <button
+                  className="open-btn ghost"
+                  onClick={() => removePreview(detail.set_id)}
+                  title="Unlink this preview — removes the link only, your audio file is kept"
+                >
+                  ✕ Unlink
+                </button>
+              </div>
+            )}
             {detail.preview_missing && (
               <p className="warn">⚠ The preview file was missing from disk and has been removed from the database.</p>
             )}
