@@ -104,6 +104,8 @@ npm run tauri dev    # first run compiles the Tauri backend — takes a few minu
 
 The app reads `~/Library/Application Support/ableton-library/library.db` — index something with `ableton-scan scan <folder>` first. The catalog is treated as partial by design: scan folders piecemeal and the app shows whatever's indexed so far.
 
+**Attaching a preview by hand**: auto-matching leans on bounces named like the set/project — a good default, but not always how it goes. In the detail pane, **Attach Audio…** lets you pick *any* audio file as that set's preview (referenced in place, never moved; it becomes the primary). The CLI equivalent is `ableton-scan attach <set> <audio>`.
+
 **Render queue (Auto-Export)**: the app can render previews for sets that have none by driving a real Ableton Live install via UI automation (`tools/export_set.py`). Live opens and runs **in the foreground** — don't touch mouse/keyboard during a render. Sets are triaged first (missing plugins/samples = lower score, easy sets render first), missing samples are relinked into a temporary proxy copy of the set (your `.als` is never modified), and finished renders attach as previews with an honest "what was missing" fidelity note.
 
 ## Repository layout

@@ -853,6 +853,26 @@ export default function App() {
     }
   };
 
+  // Manually attach any audio file as this set's preview (oddly-named bounces).
+  const attachPreviewFile = async (setId: number) => {
+    try {
+      setError(null);
+      const file = await openDialog({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Audio", extensions: ["wav", "aif", "aiff", "mp3", "m4a", "flac", "ogg"] }],
+      });
+      if (!file || typeof file !== "string") return;
+      await invoke("attach_preview", { set_id: setId, audio_path: file });
+      openDetail(setId);
+      runSearch();
+      refreshStats();
+      setError(`Note: attached "${fileName(file)}" as the preview.`);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   // Manual artist assignment. `scope` 'set' overrides just this set; 'project'
   // tags the whole folder. Blank draft clears.
   const saveArtist = async (scope: "set" | "project") => {
@@ -1432,6 +1452,13 @@ export default function App() {
                 title="Scan this project's folder for bounce/render files to use as previews"
               >
                 Scan Folder for Previews
+              </button>
+              <button
+                className="open-btn ghost"
+                onClick={() => attachPreviewFile(detail.set_id)}
+                title="Pick any audio file to use as this set's preview (for oddly-named bounces)"
+              >
+                Attach Audio…
               </button>
               {(() => {
                 const existingJob = queue.find((j) => j.set_id === detail.set_id);

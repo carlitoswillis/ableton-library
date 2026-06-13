@@ -297,7 +297,8 @@ Subcommands: `json`, `scan` (`--force --no-previews --artist`), `search`
   `search`, `inspect`, `stats`. Artist: `list_artists`, `reindex_artists`, `set_artist`,
   `set_project_artist`, `set_artist_bulk`. Lists: `get_lists`, `create_list`, `delete_list`,
   `rename_list`, `lists_for_set`, `add_set_to_list`, `remove_set_from_list`. Scan/preview:
-  `scan_folder`, `cancel_scan`, `bulk_preview_scan`, `scan_set_folder_previews`, `preview`,
+  `scan_folder`, `cancel_scan`, `bulk_preview_scan`, `scan_set_folder_previews`,
+  `attach_preview` (pick any audio file → `ops::attach`, manual, conf 1.0), `preview`,
   `open_set`. Export queue: `add_to_export_queue[_bulk]`, `get_export_queue`,
   `toggle_export_queue`, `retriage_jobs`, etc. Watch/suggestions: `*_watch_folder(s)`,
   `*_watch_suggestion(s)`, `create_proxy_set`. The **export worker** is
@@ -419,7 +420,7 @@ tools/export_set.py              macOS UI automation: drive Live's File->Export
 ai/PROJECT_STATE.md              running log + handoff snapshots (read first)
 ai/AGENTS.md                     rules for contributors (human + AI)
 ai/ARCHITECTURE.md               high-level decisions & data flow
-ai/CODEBASE_GUIDE.md             this file
+CODEBASE_GUIDE.md                this file (repo root)
 ```
 
 ---

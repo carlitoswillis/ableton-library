@@ -840,6 +840,25 @@ async fn scan_set_folder_previews(app: tauri::AppHandle, set_id: i64) -> Result<
     .map_err(|e| e.to_string())?
 }
 
+/// Manually attach ANY audio file to a set as its preview, regardless of name.
+/// For when a bounce got named in a way the auto-matcher won't catch. The file
+/// is referenced in place (never moved/copied); attached as source='manual',
+/// confidence 1.0, so it becomes the primary preview. Decodes audio for the
+/// waveform, so it runs in spawn_blocking.
+#[tauri::command(rename_all = "snake_case")]
+async fn attach_preview(set_id: i64, audio_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = std::path::Path::new(&audio_path);
+        if !p.exists() {
+            return Err(format!("file not found: {audio_path}"));
+        }
+        let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+        ops::attach(&conn, set_id, p).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Open the set in Ableton Live (default .als handler), or reveal it in Finder.
 /// Only ever opens paths stored in the catalog — never arbitrary input.
 #[tauri::command(rename_all = "snake_case")]
@@ -990,7 +1009,7 @@ pub fn run() {
             search, list_artists, reindex_artists, set_artist, set_project_artist, set_artist_bulk,
             get_lists, create_list, delete_list, rename_list, lists_for_set, add_set_to_list, remove_set_from_list,
             inspect, stats, open_set, preview, scan_folder, cancel_scan, bulk_preview_scan,
-            scan_set_folder_previews,
+            scan_set_folder_previews, attach_preview,
             add_to_export_queue, add_to_export_queue_bulk, get_export_queue, remove_from_export_queue,
             clear_completed_jobs, clear_all_jobs, retriage_jobs, toggle_export_queue, get_export_queue_active,
             retry_failed_jobs, remove_preview,

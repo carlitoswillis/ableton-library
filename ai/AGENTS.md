@@ -30,5 +30,5 @@ To minimize token waste and maximize focus, follow this priority sequence:
 1. **START HERE**: Read `PROJECT_STATE.md`. It defines the current high-level objective and active milestones.
 2. **Operational Rules**: Read `AGENTS.md` (this file). Adhere strictly to these constraints.
 3. **Architecture Details**: Read `ARCHITECTURE.md` to understand the system components and data flow.
-4. **Deep reference**: Read `CODEBASE_GUIDE.md` — the in-depth, greppable developer map (full data model, subsystem-by-subsystem reference, invariants, and step-by-step recipes for common changes). Start here before touching code.
+4. **Deep reference**: Read `CODEBASE_GUIDE.md` (at the repo root) — the in-depth, greppable developer map (full data model, subsystem-by-subsystem reference, invariants, and step-by-step recipes for common changes). Start here before touching code.
 5. **Self-Correction**: If you feel your understanding of the project state is out of sync, you may run `./ai/ai-context.sh` to refresh your local context bundle.

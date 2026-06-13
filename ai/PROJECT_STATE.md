@@ -1,5 +1,11 @@
 # Project State
 
+## ⚡ MANUAL PREVIEW ATTACH (2026-06-13 — BUILT, awaiting host verification)
+- **User ask**: attach ANY audio file as a set's preview from the app, for bounces named in a way the auto-matcher (filename similarity) won't catch. Backend already existed (`ops::attach` → `indexer::upsert_preview`, source='manual', conf 1.0 → primary; file referenced in place, never moved); only the app lacked a surface.
+- **Built**: Tauri `attach_preview(set_id, audio_path)` (spawn_blocking — decodes audio for peaks; existence-checked), registered. App detail-pane button **"Attach Audio…"** → `openDialog` file picker (audio extensions, `dialog:default` covers file open) → invoke → refresh detail+search+stats. CLI `attach <set> <audio>` unchanged.
+- **VERIFY ON HOST**: open a set, Attach Audio…, pick an oddly-named wav → it becomes the primary preview + plays in the PlayerBar. Frontend+small Rust (app only); rebuild via `tauri dev`.
+- **Doc note**: CODEBASE_GUIDE.md was moved to the repo ROOT (was ai/); references updated.
+
 ## ⚡ LISTS / FAVORITES (2026-06-13 — BUILT, awaiting host verification)
 - **User ask**: star to the left of each row (hollow = in no list, filled = in ≥1); click → pick which lists it's in (toggle existing or create new). **Multiple list membership** (many-to-many). "Favorites" = just a user-named list, not special-cased.
 - **Schema v9** (`indexer`): `lists(id, name UNIQUE NOCASE, created_at)` + `list_items(list_id→lists ON DELETE CASCADE, als_path, added_at, PK(list_id,als_path))`. **Membership keyed by `als_path`, NOT set_id** — survives re-ingest (which deletes+reinserts the set row); pruned sets leave harmless orphans that reattach if the set returns. v8→v9 migration gate + fresh path + idempotent tail (CREATE TABLE IF NOT EXISTS). Tests use `PRAGMA foreign_keys=ON` (needed for the cascade assertion).
