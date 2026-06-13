@@ -13,7 +13,12 @@ Ableton Library is a metadata and preview indexing system for Ableton projects, 
 crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot; discovery  [BUILT, verified]
 crates/previews/   # lib: render discovery, name matching, symphonia peaks  [BUILT]
 crates/indexer/    # lib: SQLite (rusqlite + FTS5) storage; pure, no workflow logic  [BUILT, verified]
-crates/ops/        # lib: workflows (scan_library, hunt_renders, attach) shared by cli + app; multi-threaded  [BUILT]
+crates/ops/        # lib: workflows shared by cli + app; multi-threaded  [BUILT]
+                   #   lib.rs: scan_library, hunt_renders, attach
+                   #   triage.rs: plugin inventory, renderability scoring, iCloud materialize, symlink relink (CLI-only)
+                   #   sample_index.rs: budgeted recursive audio index, tiered fuzzy lookup
+                   #   places.rs: Ableton Library.cfg "Places" parsing
+                   #   proxy.rs: relink planning + proxy .als writer (worker render path)
 crates/cli/        # bin: `ableton-scan` — thin wrappers over ops/indexer  [BUILT, verified]
 tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
 app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: symphonia for waveform peaks
@@ -31,7 +36,8 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
 
 ### 2. Metadata & Indexing Service — `indexer` (Rust + SQLite)
 - **Decision**: SQLite with FTS5 (over names) for search.
-- **Model**: A project *folder* contains one or more `.als` *sets*. Tables: projects -> sets (tempo, version, hash, mtime) -> tracks, plugins, samples (path + missing flag), previews.
+- **Model**: A project *folder* contains one or more `.als` *sets*. Tables: projects (name, folder_path, `artist`) -> sets (tempo, version, hash, mtime, `artist_override`) -> tracks, plugins, samples (path + missing flag), previews. Plus user **lists** (favorites/collections, schema v9): `lists` + `list_items(list_id, als_path)` — many-to-many, keyed by `als_path` so membership survives re-ingest; `SearchHit.in_list` + `SearchOpts.list_id` drive the row star and list filter.
+- **Artist (schema v7/v8)**: not in the `.als` — derived from the folder PATH at scan time (`ops::artist::infer_artist`: `artists/<name>` marker over the full path, else a year/month/bucket-skipping pass below the scan root) and stored on the project (`--artist` overrides; `reindex-artists` backfills from stored paths with no rescan). A per-SET manual override (`sets.artist_override`) lets one set differ from its folder; the **effective artist = `COALESCE(sets.artist_override, projects.artist)`** and is what `search` (filter/sort/`SearchHit`) and `list_artists` use. Scan/reindex only ever write `projects.artist`, so per-set overrides survive.
 - **Incremental**: Reindex keyed on mtime + content hash. Index lives in app data dir, never inside user project folders.
 
 ### 3. Preview Service (pluggable source interface)
@@ -47,7 +53,7 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
 
 ### 4. User Interface — Tauri 2 [skeleton BUILT 2026-06-11]
 - **Decision**: Tauri 2 shell, React/TS frontend; core logic lives in the Tauri Rust backend (no sidecar). Audio streamed to webview via asset protocol (when previews land).
-- **Implemented**: commands `search`/`inspect`/`stats` (thin wrappers over `indexer`); debounced FTS search, bpm/plugin filters, results table, detail pane. Dev-only config (bundle.active=false, no icons yet).
+- **Implemented**: commands `search`/`inspect`/`stats` (thin wrappers over `indexer`); debounced FTS search, bpm/plugin/**artist** filters, results table, detail pane. Artist UX: detail-pane editor (Save-this-set / Apply-to-project), bulk **Tag N** from the selection bar, **Reindex Artists** header button (commands `set_artist`/`set_project_artist`/`set_artist_bulk`/`reindex_artists`/`list_artists`). Dev-only config (bundle.active=false, no icons yet).
 - **Views**: Library View (Search/Filters) ✓, Set Detail pane ✓; Player pending Milestone 3.
 
 ## Data Flow

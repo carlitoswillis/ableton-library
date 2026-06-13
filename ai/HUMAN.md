@@ -5,8 +5,8 @@ Welcome to the roadmap! This document is designed for quick human reading to see
 ---
 
 ## 🚦 Current Status
-* **Phase**: **Milestone 4 — Export Worker** (⚡ In Progress — mechanism built, real-world rendering is the hard part)
-* **Status**: The machinery works (worker loop, `tools/export_set.py` automation, Render Queue UI). But field testing against old projects exposed the real problems: iCloud-evicted samples stall or slow bounces badly; old sets reference missing plugins and moved samples (Live can relocate them but only via slow scanning on open) — so bounces can take forever AND still come out missing a ton of audio. M4 is **in progress** until renders of imperfect projects are acceptable.
+* **Phase**: **Milestone 4 — Export Worker** (⚡ In Progress — breakthrough reached, verifying green runs)
+* **Status**: The full chain has been observed working end-to-end in logs: proxy set with relinked samples → Live opens → export triggered → path set via accessibility → Replace handled → render starts. The last bug class was *false failures*: the script declared defeat while renders were actually running (window-index collision with the progress dialog) — fixed 2026-06-13. Next session: confirm green runs at queue scale, then tackle remaining edges (sets where the save panel never appears, e.g. Live still loading old sets).
 
 ---
 

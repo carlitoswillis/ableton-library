@@ -9,5 +9,10 @@ indexer = { path = "../indexer" }
 previews = { path = "../previews" }
 anyhow = "1"
 chrono = "0.4"
+dirs = "5"
+flate2 = "1"
+quick-xml = "0.36"
 rusqlite = "0.32"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"

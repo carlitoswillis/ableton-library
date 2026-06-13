@@ -134,9 +134,59 @@ const SCHEMA_V5: &str = r#"
 ALTER TABLE sets ADD COLUMN tempos_json TEXT NOT NULL DEFAULT '[]';
 "#;
 
+/// v6: renderability triage (M4a) — score + fidelity report on jobs, and
+/// fidelity carried onto worker-generated previews.
+const SCHEMA_V6: &str = r#"
+ALTER TABLE export_jobs ADD COLUMN score REAL;
+ALTER TABLE export_jobs ADD COLUMN fidelity TEXT;
+ALTER TABLE previews ADD COLUMN fidelity TEXT;
+"#;
+
+/// v7: artist as a first-class project attribute. Derived from the folder
+/// path at scan time (or set explicitly via the scanner's override), so the
+/// catalog can be filtered/grouped by artist. NULL = unknown (e.g. pure
+/// year/month layouts). Existing rows stay NULL until the next rescan
+/// re-derives them (upsert_project runs on every scan).
+const SCHEMA_V7: &str = r#"
+ALTER TABLE projects ADD COLUMN artist TEXT;
+CREATE INDEX IF NOT EXISTS idx_projects_artist ON projects(artist);
+"#;
+
+/// v8: per-set artist override. A manual tag on one set; the set's effective
+/// artist is `COALESCE(sets.artist_override, projects.artist)` — so auto/
+/// project-level derivation stays the default and a hand-tag overrides just
+/// that set. Untouched by scan/reindex (those only write projects.artist), so
+/// manual per-set tags survive a rescan.
+const SCHEMA_V8: &str = r#"
+ALTER TABLE sets ADD COLUMN artist_override TEXT;
+CREATE INDEX IF NOT EXISTS idx_sets_artist_override ON sets(artist_override);
+"#;
+
+/// v9: user-curated lists (favorites + named collections). Many-to-many: a set
+/// can be in many lists. Membership is keyed by `als_path` (the set's stable
+/// identity), NOT set_id — so lists SURVIVE re-ingest, which deletes+reinserts
+/// the set row (and would otherwise orphan a row-id FK). Deleting a list
+/// cascades its items; pruned sets just leave harmless orphan rows that
+/// reattach if the set returns.
+const SCHEMA_V9: &str = r#"
+CREATE TABLE IF NOT EXISTS lists (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lists_name ON lists(name COLLATE NOCASE);
+CREATE TABLE IF NOT EXISTS list_items (
+    list_id  INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+    als_path TEXT NOT NULL,
+    added_at TEXT NOT NULL,
+    PRIMARY KEY (list_id, als_path)
+);
+CREATE INDEX IF NOT EXISTS idx_list_items_path ON list_items(als_path);
+"#;
+
 /// Current schema version. Migrations upgrade older catalogs in place;
 /// catalogs NEWER than this build are refused.
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 9;
 
 /// Open (creating if needed) the index database, migrating if needed.
 pub fn open(db_path: &Path) -> Result<Connection> {
@@ -162,9 +212,12 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         conn.execute_batch(SCHEMA_V2)?;
         conn.execute_batch(SCHEMA_V3)?;
         conn.execute_batch(SCHEMA_V4)?;
-        // v5 requires ALTER TABLE, but if we just created the table with v0 SCHEMA, it doesn't have tempos_json unless we add it to the original SCHEMA or run V5.
-        // It's cleaner to just run V5 here.
+        // v5..v8 are ALTER TABLEs; run them after base creation.
         conn.execute_batch(SCHEMA_V5)?;
+        conn.execute_batch(SCHEMA_V6)?;
+        conn.execute_batch(SCHEMA_V7)?;
+        conn.execute_batch(SCHEMA_V8)?;
+        conn.execute_batch(SCHEMA_V9)?;
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         return Ok(conn);
     }
@@ -184,22 +237,52 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     if version == 4 {
         conn.execute_batch(SCHEMA_V5)?;
         version = 5;
-        conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
     }
+    if version == 5 {
+        conn.execute_batch(SCHEMA_V6)?;
+        version = 6;
+    }
+    if version == 6 {
+        conn.execute_batch(SCHEMA_V7)?;
+        version = 7;
+    }
+    if version == 7 {
+        conn.execute_batch(SCHEMA_V8)?;
+        version = 8;
+    }
+    if version == 8 {
+        conn.execute_batch(SCHEMA_V9)?;
+        version = 9;
+    }
+    conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
     debug_assert_eq!(version, SCHEMA_VERSION);
     conn.execute_batch(SCHEMA)?; // idempotent (IF NOT EXISTS)
     conn.execute_batch(SCHEMA_V2)?;
     conn.execute_batch(SCHEMA_V3)?;
     conn.execute_batch(SCHEMA_V4)?;
-    // v5 is ALTER TABLE, not idempotent (IF NOT EXISTS), so we don't re-run it blindly if version was already 5.
+    conn.execute_batch(SCHEMA_V9)?; // CREATE TABLE IF NOT EXISTS — safe to re-run
+    // v5..v8 are ALTER TABLEs, not idempotent, so we don't re-run them blindly.
     Ok(conn)
 }
 
-pub fn upsert_project(conn: &Connection, folder_path: &str, name: &str, now: &str) -> Result<i64> {
+/// Insert or refresh a project row. `artist` is the path-derived (or
+/// explicitly-overridden) artist; `None` means "unknown / leave as-is".
+/// On conflict we COALESCE — a later broad scan that can't infer an artist
+/// won't wipe one that an earlier targeted scan (or `--artist`) established.
+pub fn upsert_project(
+    conn: &Connection,
+    folder_path: &str,
+    name: &str,
+    artist: Option<&str>,
+    now: &str,
+) -> Result<i64> {
     conn.execute(
-        "INSERT INTO projects (folder_path, name, last_scanned) VALUES (?1, ?2, ?3)
-         ON CONFLICT(folder_path) DO UPDATE SET name = ?2, last_scanned = ?3",
-        params![folder_path, name, now],
+        "INSERT INTO projects (folder_path, name, artist, last_scanned) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(folder_path) DO UPDATE SET
+            name = ?2,
+            artist = COALESCE(?3, artist),
+            last_scanned = ?4",
+        params![folder_path, name, artist, now],
     )?;
     Ok(conn.query_row(
         "SELECT id FROM projects WHERE folder_path = ?1",
@@ -382,6 +465,9 @@ pub struct PreviewRow {
     pub duration: Option<f64>,
     /// JSON array of 0..1 floats (waveform bins), already serialized.
     pub peaks_json: Option<String>,
+    /// JSON renderability/fidelity report (worker renders of imperfect sets),
+    /// e.g. {"missing_plugins":["Serum"],"samples_missing":3}. None = full fidelity assumed.
+    pub fidelity_json: Option<String>,
 }
 
 /// True if a preview row for (set_id, audio_path) exists with same size+mtime.
@@ -416,11 +502,11 @@ pub fn upsert_preview(conn: &Connection, p: &PreviewRow) -> Result<()> {
     )?;
     conn.execute(
         "INSERT INTO previews (set_id, project_id, audio_path, source, confidence,
-                               mtime, size, duration, peaks, is_primary)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)",
+                               mtime, size, duration, peaks, fidelity, is_primary)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0)",
         params![
             p.set_id, p.project_id, p.audio_path, p.source, p.confidence,
-            p.mtime, p.size, p.duration, p.peaks_json
+            p.mtime, p.size, p.duration, p.peaks_json, p.fidelity_json
         ],
     )?;
     if let Some(set_id) = p.set_id {
@@ -445,12 +531,12 @@ pub fn recompute_primary(conn: &Connection, set_id: i64) -> Result<()> {
 pub fn primary_preview(
     conn: &Connection,
     set_id: i64,
-) -> Result<Option<(String, Option<f64>, Option<String>, f64, String)>> {
+) -> Result<Option<(String, Option<f64>, Option<String>, f64, String, Option<String>)>> {
     conn.query_row(
-        "SELECT audio_path, duration, peaks, confidence, source
+        "SELECT audio_path, duration, peaks, confidence, source, fidelity
          FROM previews WHERE set_id = ?1 AND is_primary = 1",
         params![set_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
     )
     .map(Some)
     .or_else(|e| match e {
@@ -538,6 +624,10 @@ pub struct SearchOpts {
     pub min_bpm: Option<f64>,
     pub max_bpm: Option<f64>,
     pub plugin: Option<String>,
+    /// Substring match (case-insensitive) on the project's derived artist.
+    pub artist: Option<String>,
+    /// Restrict to sets that are members of this list.
+    pub list_id: Option<i64>,
     pub sort_by: Option<String>,
     pub date_modified: Option<String>,
     pub date_scanned: Option<String>,
@@ -548,6 +638,7 @@ pub struct SearchOpts {
 pub struct SearchHit {
     pub set_id: i64,
     pub project: String,
+    pub artist: Option<String>,
     pub als_path: String,
     pub tempo: Option<f64>,
     pub tempos: Vec<f64>,
@@ -555,12 +646,15 @@ pub struct SearchHit {
     pub live_version: Option<String>,
     pub has_preview: bool,
     pub preview_duration: Option<f64>,
+    /// True if this set belongs to at least one user list (drives the star).
+    pub in_list: bool,
 }
 
 pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
     let order_by = match o.sort_by.as_deref() {
         Some("modified") => "s.mtime DESC, p.name, s.als_path",
         Some("bpm") => "s.tempo DESC, p.name, s.als_path",
+        Some("artist") => "COALESCE(s.artist_override, p.artist) IS NULL, COALESCE(s.artist_override, p.artist), p.name, s.als_path",
         Some("previews") => "pv.audio_path IS NULL, p.name, s.als_path",
         _ => {
             if o.text.is_some() {
@@ -592,7 +686,8 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
     let sql = if o.text.is_some() {
         format!(
             "SELECT s.id, p.name, s.als_path, s.tempo, s.tempos_json, s.time_signature, s.live_version,
-                    pv.audio_path, pv.duration
+                    pv.audio_path, pv.duration, COALESCE(s.artist_override, p.artist),
+                    EXISTS (SELECT 1 FROM list_items li WHERE li.als_path = s.als_path)
              FROM search f
              JOIN sets s ON s.id = f.set_id
              JOIN projects p ON p.id = s.project_id
@@ -606,13 +701,17 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
                AND (?5 IS NULL OR s.mtime >= ?5)
                AND (?6 IS NULL OR p.last_scanned >= ?6)
                AND (?7 IS NULL OR ?7 = 'all' OR (?7 = 'yes' AND pv.audio_path IS NOT NULL) OR (?7 = 'no' AND pv.audio_path IS NULL))
+               AND (?8 IS NULL OR COALESCE(s.artist_override, p.artist) LIKE '%' || ?8 || '%')
+               AND (?9 IS NULL OR EXISTS (SELECT 1 FROM list_items li2
+                                          WHERE li2.als_path = s.als_path AND li2.list_id = ?9))
              ORDER BY {}",
             order_by
         )
     } else {
         format!(
             "SELECT s.id, p.name, s.als_path, s.tempo, s.tempos_json, s.time_signature, s.live_version,
-                    pv.audio_path, pv.duration
+                    pv.audio_path, pv.duration, COALESCE(s.artist_override, p.artist),
+                    EXISTS (SELECT 1 FROM list_items li WHERE li.als_path = s.als_path)
              FROM sets s
              JOIN projects p ON p.id = s.project_id
              LEFT JOIN previews pv ON pv.set_id = s.id AND pv.is_primary = 1
@@ -625,6 +724,9 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
                AND (?5 IS NULL OR s.mtime >= ?5)
                AND (?6 IS NULL OR p.last_scanned >= ?6)
                AND (?7 IS NULL OR ?7 = 'all' OR (?7 = 'yes' AND pv.audio_path IS NOT NULL) OR (?7 = 'no' AND pv.audio_path IS NULL))
+               AND (?8 IS NULL OR COALESCE(s.artist_override, p.artist) LIKE '%' || ?8 || '%')
+               AND (?9 IS NULL OR EXISTS (SELECT 1 FROM list_items li2
+                                          WHERE li2.als_path = s.als_path AND li2.list_id = ?9))
              ORDER BY {}",
             order_by
         )
@@ -639,6 +741,8 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
             modified_bound_str,
             scanned_bound_str,
             o.has_preview,
+            o.artist,
+            o.list_id,
         ],
         |r| {
             let preview_path: Option<String> = r.get(7)?;
@@ -647,6 +751,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
             Ok(SearchHit {
                 set_id: r.get(0)?,
                 project: r.get(1)?,
+                artist: r.get(9)?,
                 als_path: r.get(2)?,
                 tempo: r.get(3)?,
                 tempos,
@@ -654,6 +759,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
                 live_version: r.get(6)?,
                 has_preview: preview_path.is_some(),
                 preview_duration: r.get(8)?,
+                in_list: r.get::<_, i64>(10)? != 0,
             })
         },
     )?;
@@ -685,6 +791,17 @@ pub fn resolve_set(conn: &Connection, query: &str) -> Result<i64> {
             |r| r.get(0),
         )
         .with_context(|| format!("no set matching '{query}'"))?)
+}
+
+/// All indexed sample paths sharing a basename — the catalog-as-search-index
+/// behind missing-sample relinking (we know where files moved to because
+/// some other set references them at their new home).
+pub fn sample_paths_by_basename(conn: &Connection, basename: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT path FROM samples WHERE path LIKE '%/' || ?1",
+    )?;
+    let rows = stmt.query_map(params![basename], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Every sample path referenced by any indexed set — used by render discovery
@@ -742,12 +859,22 @@ pub fn set_path(conn: &Connection, set_id: i64) -> Result<String> {
 pub fn set_detail(conn: &Connection, set_id: i64) -> Result<serde_json::Value> {
     let mut out = serde_json::Map::new();
     conn.query_row(
-        "SELECT s.als_path, s.live_version, s.tempo, s.tempos_json, s.time_signature, s.warnings, p.name
+        "SELECT s.als_path, s.live_version, s.tempo, s.tempos_json, s.time_signature, s.warnings,
+                p.name, p.artist, s.artist_override
          FROM sets s JOIN projects p ON p.id = s.project_id WHERE s.id = ?1",
         params![set_id],
         |r| {
+            let project_artist: Option<String> = r.get(7)?;
+            let artist_override: Option<String> = r.get(8)?;
             out.insert("set_id".into(), set_id.into());
             out.insert("project".into(), r.get::<_, String>(6)?.into());
+            // Effective artist = per-set override else the project's derived one.
+            out.insert(
+                "artist".into(),
+                artist_override.clone().or_else(|| project_artist.clone()).into(),
+            );
+            out.insert("artist_override".into(), artist_override.into());
+            out.insert("project_artist".into(), project_artist.into());
             out.insert("als_path".into(), r.get::<_, String>(0)?.into());
             out.insert("live_version".into(), r.get::<_, Option<String>>(1)?.into());
             out.insert("tempo".into(), r.get::<_, Option<f64>>(2)?.into());
@@ -868,6 +995,133 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
     })
 }
 
+/// (id, folder_path) for every indexed project — used by the no-scan artist
+/// backfill, which re-derives artist from the path already on record.
+pub fn all_projects(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare("SELECT id, folder_path FROM projects")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Set a project's artist directly (the reindex/backfill path). Unlike
+/// `upsert_project` this overwrites unconditionally — the caller only calls it
+/// when it has a derived value, so it won't clobber with NULL.
+pub fn set_project_artist(conn: &Connection, project_id: i64, artist: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE projects SET artist = ?2 WHERE id = ?1",
+        params![project_id, artist],
+    )?;
+    Ok(())
+}
+
+/// Manually set or clear a project's artist (`None` writes NULL). This is the
+/// user's explicit assignment — used when the path-deriver found nothing.
+pub fn set_project_artist_opt(
+    conn: &Connection,
+    project_id: i64,
+    artist: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE projects SET artist = ?2 WHERE id = ?1",
+        params![project_id, artist],
+    )?;
+    Ok(())
+}
+
+/// Distinct artists with how many SETS each has (by effective artist =
+/// per-set override else project's), most-sets first. Sets with no artist at
+/// all are grouped under a `None` key (listed last) for an "Unknown" bucket.
+pub fn list_artists(conn: &Connection) -> Result<Vec<(Option<String>, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(s.artist_override, p.artist) AS artist, COUNT(*) AS n
+         FROM sets s JOIN projects p ON p.id = s.project_id
+         GROUP BY artist
+         ORDER BY (artist IS NULL) ASC, n DESC, artist COLLATE NOCASE ASC",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+// ---- User lists (favorites + named collections) --------------------------
+
+/// Create a list (or return the existing one with that name — case-insensitive).
+pub fn create_list(conn: &Connection, name: &str) -> Result<i64> {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
+    conn.execute(
+        "INSERT INTO lists (name, created_at) VALUES (?1, ?2)
+         ON CONFLICT(name) DO NOTHING",
+        params![name, now],
+    )?;
+    Ok(conn.query_row(
+        "SELECT id FROM lists WHERE name = ?1 COLLATE NOCASE",
+        params![name],
+        |r| r.get(0),
+    )?)
+}
+
+/// Delete a list (its memberships cascade away).
+pub fn delete_list(conn: &Connection, list_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM lists WHERE id = ?1", params![list_id])?;
+    Ok(())
+}
+
+/// Rename a list.
+pub fn rename_list(conn: &Connection, list_id: i64, name: &str) -> Result<()> {
+    conn.execute("UPDATE lists SET name = ?2 WHERE id = ?1", params![list_id, name])?;
+    Ok(())
+}
+
+/// All lists as (id, name, item_count), newest-used... actually by name.
+pub fn all_lists(conn: &Connection) -> Result<Vec<(i64, String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT l.id, l.name, (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id)
+         FROM lists l ORDER BY l.name COLLATE NOCASE ASC",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Add a set (by its stable als_path) to a list. Idempotent.
+pub fn add_to_list(conn: &Connection, list_id: i64, als_path: &str) -> Result<()> {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
+    conn.execute(
+        "INSERT INTO list_items (list_id, als_path, added_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(list_id, als_path) DO NOTHING",
+        params![list_id, als_path, now],
+    )?;
+    Ok(())
+}
+
+/// Remove a set from a list.
+pub fn remove_from_list(conn: &Connection, list_id: i64, als_path: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM list_items WHERE list_id = ?1 AND als_path = ?2",
+        params![list_id, als_path],
+    )?;
+    Ok(())
+}
+
+/// The list ids a given set (by als_path) currently belongs to.
+pub fn lists_for_path(conn: &Connection, als_path: &str) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT list_id FROM list_items WHERE als_path = ?1")?;
+    let rows = stmt.query_map(params![als_path], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Manually set or clear the per-set artist override (`None` clears it, so the
+/// set falls back to its project's derived artist).
+pub fn set_set_artist_override(
+    conn: &Connection,
+    set_id: i64,
+    artist: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE sets SET artist_override = ?2 WHERE id = ?1",
+        params![set_id, artist],
+    )?;
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 pub struct ExportJobInfo {
     pub id: i64,
@@ -879,6 +1133,10 @@ pub struct ExportJobInfo {
     pub created_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    /// Renderability 0..1 computed at queue time (None = not yet scored).
+    pub score: Option<f64>,
+    /// JSON renderability report (missing plugins, missing/evicted samples).
+    pub fidelity: Option<String>,
 }
 
 pub fn add_export_job(conn: &Connection, set_id: i64) -> Result<()> {
@@ -921,12 +1179,14 @@ pub fn add_export_jobs_bulk(conn: &Connection, set_ids: &[i64]) -> Result<usize>
 }
 
 pub fn get_pending_export_job(conn: &Connection) -> Result<Option<(i64, i64, String)>> {
+    // Easy-first triage (M4a): highest renderability score first, unscored
+    // jobs last, FIFO within ties.
     let mut stmt = conn.prepare(
         "SELECT j.id, j.set_id, s.als_path
          FROM export_jobs j
          JOIN sets s ON s.id = j.set_id
          WHERE j.status = 'pending'
-         ORDER BY j.id ASC LIMIT 1",
+         ORDER BY (j.score IS NULL) ASC, j.score DESC, j.id ASC LIMIT 1",
     )?;
     let row = stmt.query_row([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .map(Some)
@@ -935,6 +1195,40 @@ pub fn get_pending_export_job(conn: &Connection) -> Result<Option<(i64, i64, Str
             e => Err(e),
         })?;
     Ok(row)
+}
+
+/// Store the triage result on a job (M4a).
+pub fn set_export_job_triage(
+    conn: &Connection,
+    job_id: i64,
+    score: f64,
+    fidelity_json: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE export_jobs SET score = ?1, fidelity = ?2 WHERE id = ?3",
+        params![score, fidelity_json, job_id],
+    )?;
+    Ok(())
+}
+
+/// Triage inputs for one set: non-native devices (kind, name, manufacturer)
+/// and all referenced sample paths.
+pub fn set_render_inputs(
+    conn: &Connection,
+    set_id: i64,
+) -> Result<(Vec<(String, Option<String>, Option<String>)>, Vec<(String, bool)>)> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, name, manufacturer FROM devices
+         WHERE set_id = ?1 AND kind != 'native'",
+    )?;
+    let plugins = stmt
+        .query_map(params![set_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut stmt = conn.prepare("SELECT path, in_project FROM samples WHERE set_id = ?1")?;
+    let samples = stmt
+        .query_map(params![set_id], |r| Ok((r.get(0)?, r.get::<_, i32>(1)? != 0)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok((plugins, samples))
 }
 
 pub fn update_export_job_status(
@@ -969,7 +1263,7 @@ pub fn update_export_job_status(
 
 pub fn get_export_queue(conn: &Connection) -> Result<Vec<ExportJobInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT j.id, j.set_id, s.als_path, p.name, j.status, j.error, j.created_at, j.started_at, j.completed_at
+        "SELECT j.id, j.set_id, s.als_path, p.name, j.status, j.error, j.created_at, j.started_at, j.completed_at, j.score, j.fidelity
          FROM export_jobs j
          JOIN sets s ON s.id = j.set_id
          JOIN projects p ON p.id = s.project_id
@@ -986,6 +1280,8 @@ pub fn get_export_queue(conn: &Connection) -> Result<Vec<ExportJobInfo>> {
             created_at: r.get(6)?,
             started_at: r.get(7)?,
             completed_at: r.get(8)?,
+            score: r.get(9)?,
+            fidelity: r.get(10)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -997,6 +1293,15 @@ pub fn clear_completed_export_jobs(conn: &Connection) -> Result<()> {
         [],
     )?;
     Ok(())
+}
+
+/// Empty the queue. A job currently `processing` is kept — its Live render
+/// is mid-flight and the worker must be able to record the outcome.
+pub fn clear_all_export_jobs(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute(
+        "DELETE FROM export_jobs WHERE status != 'processing'",
+        [],
+    )?)
 }
 
 pub fn retry_failed_export_jobs(conn: &Connection) -> Result<()> {
@@ -1011,6 +1316,58 @@ pub fn retry_failed_export_jobs(conn: &Connection) -> Result<()> {
 pub fn remove_export_job(conn: &Connection, job_id: i64) -> Result<()> {
     conn.execute("DELETE FROM export_jobs WHERE id = ?1", params![job_id])?;
     Ok(())
+}
+
+/// Wipe scores on pending jobs so they get re-scored (e.g. after the plugin
+/// inventory upgrades from quick to full).
+pub fn clear_pending_job_scores(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE export_jobs SET score = NULL, fidelity = NULL WHERE status = 'pending'",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Wipe stale score/fidelity from finished jobs (they may have been stamped
+/// by older, buggier matching logic).
+pub fn clear_finished_job_fidelity(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE export_jobs SET score = NULL, fidelity = NULL
+         WHERE status IN ('completed', 'failed')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Sets that have a worker-generated preview (for fidelity restamping).
+pub fn worker_preview_set_ids(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT set_id FROM previews WHERE source = 'worker' AND set_id IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Replace the fidelity stamp on a set's worker preview(s).
+pub fn update_worker_preview_fidelity(
+    conn: &Connection,
+    set_id: i64,
+    fidelity_json: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE previews SET fidelity = ?2 WHERE set_id = ?1 AND source = 'worker'",
+        params![set_id, fidelity_json],
+    )?;
+    Ok(())
+}
+
+/// Pending jobs that haven't been triage-scored yet.
+pub fn unscored_pending_jobs(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM export_jobs WHERE status = 'pending' AND score IS NULL",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 pub fn reset_stale_export_jobs(conn: &Connection) -> Result<()> {
@@ -1068,9 +1425,15 @@ mod tests {
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(SCHEMA_V2)?;
         conn.execute_batch(SCHEMA_V3)?;
+        conn.execute_batch(SCHEMA_V4)?;
+        conn.execute_batch(SCHEMA_V5)?;
+        conn.execute_batch(SCHEMA_V6)?;
+        conn.execute_batch(SCHEMA_V7)?;
+        conn.execute_batch(SCHEMA_V8)?;
+        conn.execute_batch(SCHEMA_V9)?;
 
         // Insert project
-        let project_id = upsert_project(&conn, "/path/to/project", "My Project", "2026-06-11T12:00:00+00:00")?;
+        let project_id = upsert_project(&conn, "/path/to/project", "My Project", None, "2026-06-11T12:00:00+00:00")?;
 
         // Insert set
         conn.execute(
@@ -1090,6 +1453,7 @@ mod tests {
             size: 1000,
             duration: Some(10.0),
             peaks_json: Some("[]".into()),
+            fidelity_json: None,
         };
         upsert_preview(&conn, &row)?;
 
@@ -1110,6 +1474,172 @@ mod tests {
         Ok(())
     }
 
+    fn fresh_db() -> Result<Connection> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(SCHEMA_V2)?;
+        conn.execute_batch(SCHEMA_V3)?;
+        conn.execute_batch(SCHEMA_V4)?;
+        conn.execute_batch(SCHEMA_V5)?;
+        conn.execute_batch(SCHEMA_V6)?;
+        conn.execute_batch(SCHEMA_V7)?;
+        conn.execute_batch(SCHEMA_V8)?;
+        conn.execute_batch(SCHEMA_V9)?;
+        Ok(conn)
+    }
+
+    fn opts(artist: Option<&str>) -> SearchOpts {
+        SearchOpts {
+            text: None,
+            min_bpm: None,
+            max_bpm: None,
+            plugin: None,
+            artist: artist.map(|s| s.to_string()),
+            list_id: None,
+            sort_by: None,
+            date_modified: None,
+            date_scanned: None,
+            has_preview: None,
+        }
+    }
+
+    #[test]
+    fn test_artist_column_search_and_coalesce() -> Result<()> {
+        let conn = fresh_db()?;
+        let now = "2026-06-13T00:00:00+00:00";
+
+        // Project tagged with an artist, plus one with no artist.
+        let pid_a = upsert_project(&conn, "/lib/burial/untrue", "untrue", Some("Burial"), now)?;
+        let _pid_b = upsert_project(&conn, "/lib/2024/jan/sketch", "sketch", None, now)?;
+
+        // A later broad scan that can't infer the artist must NOT wipe it.
+        let pid_a2 = upsert_project(&conn, "/lib/burial/untrue", "untrue", None, now)?;
+        assert_eq!(pid_a, pid_a2);
+        let stored: Option<String> = conn.query_row(
+            "SELECT artist FROM projects WHERE id = ?1", params![pid_a], |r| r.get(0))?;
+        assert_eq!(stored.as_deref(), Some("Burial"));
+
+        // Each project needs a set to appear in search results.
+        for (i, pid) in [pid_a, _pid_b].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO sets (project_id, als_path, file_size, mtime, content_hash, warnings)
+                 VALUES (?1, ?2, 100, ?3, 'h', '[]')",
+                params![pid, format!("/lib/set{i}.als"), now],
+            )?;
+        }
+
+        // Filter by artist (substring, case-insensitive).
+        let hits = search(&conn, &opts(Some("buri")))?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].artist.as_deref(), Some("Burial"));
+
+        // No filter -> both sets; the artist rides along on the hit.
+        let all = search(&conn, &opts(None))?;
+        assert_eq!(all.len(), 2);
+
+        // list_artists: known artist first, Unknown bucket last.
+        let artists = list_artists(&conn)?;
+        assert_eq!(artists.len(), 2);
+        assert_eq!(artists[0], (Some("Burial".to_string()), 1));
+        assert_eq!(artists[1], (None, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn test_per_set_artist_override() -> Result<()> {
+        let conn = fresh_db()?;
+        let now = "2026-06-13T00:00:00+00:00";
+        // One project (derived artist "Burial") with two sets.
+        let pid = upsert_project(&conn, "/lib/burial/untrue", "untrue", Some("Burial"), now)?;
+        for i in 0..2 {
+            conn.execute(
+                "INSERT INTO sets (id, project_id, als_path, file_size, mtime, content_hash, warnings)
+                 VALUES (?1, ?2, ?3, 100, ?4, 'h', '[]')",
+                params![i + 1, pid, format!("/lib/burial/untrue/s{i}.als"), now],
+            )?;
+        }
+        // Both sets inherit the project artist.
+        assert_eq!(search(&conn, &opts(Some("burial")))?.len(), 2);
+
+        // Override just set 2 -> "Four Tet" (a collab). Effective artist flips.
+        set_set_artist_override(&conn, 2, Some("Four Tet"))?;
+        let burial = search(&conn, &opts(Some("burial")))?;
+        assert_eq!(burial.len(), 1); // only set 1 still reads Burial
+        assert_eq!(burial[0].set_id, 1);
+        let ft = search(&conn, &opts(Some("four tet")))?;
+        assert_eq!(ft.len(), 1);
+        assert_eq!(ft[0].set_id, 2);
+        assert_eq!(ft[0].artist.as_deref(), Some("Four Tet"));
+
+        // list_artists counts SETS by effective artist.
+        let artists = list_artists(&conn)?;
+        assert!(artists.contains(&(Some("Burial".to_string()), 1)));
+        assert!(artists.contains(&(Some("Four Tet".to_string()), 1)));
+
+        // Clearing the override falls back to the project artist.
+        set_set_artist_override(&conn, 2, None)?;
+        assert_eq!(search(&conn, &opts(Some("burial")))?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_lists_membership_and_filter() -> Result<()> {
+        let conn = fresh_db()?;
+        let now = "2026-06-13T00:00:00+00:00";
+        let pid = upsert_project(&conn, "/lib/p", "p", None, now)?;
+        // Two sets.
+        for i in 0..2 {
+            conn.execute(
+                "INSERT INTO sets (id, project_id, als_path, file_size, mtime, content_hash, warnings)
+                 VALUES (?1, ?2, ?3, 100, ?4, 'h', '[]')",
+                params![i + 1, pid, format!("/lib/p/s{i}.als"), now],
+            )?;
+        }
+        let p0 = "/lib/p/s0.als";
+        let p1 = "/lib/p/s1.als";
+
+        // Create lists (get-or-create is case-insensitive idempotent).
+        let favs = create_list(&conn, "Favorites")?;
+        assert_eq!(create_list(&conn, "favorites")?, favs);
+        let mix = create_list(&conn, "to mix")?;
+
+        // Multi-list membership: s0 in both, s1 in none.
+        add_to_list(&conn, favs, p0)?;
+        add_to_list(&conn, mix, p0)?;
+        add_to_list(&conn, favs, p0)?; // idempotent
+
+        let mut s0_lists = lists_for_path(&conn, p0)?;
+        s0_lists.sort();
+        let mut want = vec![favs, mix];
+        want.sort();
+        assert_eq!(s0_lists, want);
+        assert!(lists_for_path(&conn, p1)?.is_empty());
+
+        // in_list flag in search.
+        let all = search(&conn, &opts(None))?;
+        let s0 = all.iter().find(|h| h.set_id == 1).unwrap();
+        let s1 = all.iter().find(|h| h.set_id == 2).unwrap();
+        assert!(s0.in_list);
+        assert!(!s1.in_list);
+
+        // Filter by list.
+        let mut o = opts(None);
+        o.list_id = Some(mix);
+        let in_mix = search(&conn, &o)?;
+        assert_eq!(in_mix.len(), 1);
+        assert_eq!(in_mix[0].set_id, 1);
+
+        // Counts + remove + cascade on delete.
+        let lists = all_lists(&conn)?;
+        assert_eq!(lists.iter().find(|l| l.0 == favs).unwrap().2, 1);
+        remove_from_list(&conn, mix, p0)?;
+        assert_eq!(lists_for_path(&conn, p0)?, vec![favs]);
+        delete_list(&conn, favs)?;
+        assert!(lists_for_path(&conn, p0)?.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn test_watch_folders_and_ignored_matches() -> Result<()> {
         let conn = Connection::open_in_memory()?;
@@ -1117,9 +1647,15 @@ mod tests {
         conn.execute_batch(SCHEMA_V2)?;
         conn.execute_batch(SCHEMA_V3)?;
         conn.execute_batch(SCHEMA_V4)?;
+        conn.execute_batch(SCHEMA_V5)?;
+        conn.execute_batch(SCHEMA_V6)?;
+        conn.execute_batch(SCHEMA_V7)?;
+        conn.execute_batch(SCHEMA_V8)?;
+        conn.execute_batch(SCHEMA_V9)?;
+        conn.execute_batch(SCHEMA_V4)?;
 
         // Insert project and set to satisfy foreign key constraint on ignored_matches
-        let project_id = upsert_project(&conn, "/path/to/project", "My Project", "2026-06-11T12:00:00+00:00")?;
+        let project_id = upsert_project(&conn, "/path/to/project", "My Project", None, "2026-06-11T12:00:00+00:00")?;
         conn.execute(
             "INSERT INTO sets (id, project_id, als_path, file_size, mtime, content_hash, warnings)
              VALUES (1, ?1, '/path/to/project/set.als', 100, '2026-06-11T12:00:00+00:00', 'hash', '[]')",

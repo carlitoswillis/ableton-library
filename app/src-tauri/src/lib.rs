@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use tauri::Manager;
+use tokio::process::Command;
 
 use serde_json::Value;
 
@@ -23,6 +24,8 @@ async fn search(
     min_bpm: Option<f64>,
     max_bpm: Option<f64>,
     plugin: Option<String>,
+    artist: Option<String>,
+    list_id: Option<i64>,
     sort_by: Option<String>,
     date_modified: Option<String>,
     date_scanned: Option<String>,
@@ -36,6 +39,8 @@ async fn search(
             min_bpm,
             max_bpm,
             plugin: none_if_blank(plugin),
+            artist: none_if_blank(artist),
+            list_id,
             sort_by: none_if_blank(sort_by),
             date_modified: none_if_blank(date_modified),
             date_scanned: none_if_blank(date_scanned),
@@ -43,6 +48,110 @@ async fn search(
         },
     )
     .map_err(|e| e.to_string())
+}
+
+// ---- User lists (favorites + collections) --------------------------------
+
+/// All lists as (id, name, item_count).
+#[tauri::command(rename_all = "snake_case")]
+async fn get_lists() -> Result<Vec<(i64, String, i64)>, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::all_lists(&conn).map_err(|e| e.to_string())
+}
+
+/// Create (or get existing) a list by name. Returns its id.
+#[tauri::command(rename_all = "snake_case")]
+async fn create_list(name: String) -> Result<i64, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("list name cannot be empty".into());
+    }
+    indexer::create_list(&conn, name).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn delete_list(list_id: i64) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::delete_list(&conn, list_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn rename_list(list_id: i64, name: String) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::rename_list(&conn, list_id, name.trim()).map_err(|e| e.to_string())
+}
+
+/// The list ids a set currently belongs to (for the star popover checkboxes).
+#[tauri::command(rename_all = "snake_case")]
+async fn lists_for_set(set_id: i64) -> Result<Vec<i64>, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let path = indexer::set_path(&conn, set_id).map_err(|e| e.to_string())?;
+    indexer::lists_for_path(&conn, &path).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn add_set_to_list(list_id: i64, set_id: i64) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let path = indexer::set_path(&conn, set_id).map_err(|e| e.to_string())?;
+    indexer::add_to_list(&conn, list_id, &path).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn remove_set_from_list(list_id: i64, set_id: i64) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let path = indexer::set_path(&conn, set_id).map_err(|e| e.to_string())?;
+    indexer::remove_from_list(&conn, list_id, &path).map_err(|e| e.to_string())
+}
+
+/// Distinct artists with project counts (for the artist filter dropdown).
+#[tauri::command(rename_all = "snake_case")]
+async fn list_artists() -> Result<Vec<(Option<String>, i64)>, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::list_artists(&conn).map_err(|e| e.to_string())
+}
+
+/// Backfill artists from stored project paths — no scan, no re-parse.
+/// Returns how many projects were tagged.
+#[tauri::command(rename_all = "snake_case")]
+async fn reindex_artists() -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+        ops::reindex_artists(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Manually set/clear ONE set's artist override (blank clears -> the set falls
+/// back to its project's derived artist).
+#[tauri::command(rename_all = "snake_case")]
+async fn set_artist(set_id: i64, artist: Option<String>) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::set_set_artist_override(&conn, set_id, none_if_blank(artist).as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// Manually set/clear the artist for the WHOLE project the set belongs to
+/// (every set in that folder, unless a set has its own override).
+#[tauri::command(rename_all = "snake_case")]
+async fn set_project_artist(set_id: i64, artist: Option<String>) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let pid = indexer::set_project_id(&conn, set_id).map_err(|e| e.to_string())?;
+    indexer::set_project_artist_opt(&conn, pid, none_if_blank(artist).as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// Set/clear the per-set artist override on many sets at once (bulk tagging
+/// from the results selection). Returns how many sets were touched.
+#[tauri::command(rename_all = "snake_case")]
+async fn set_artist_bulk(set_ids: Vec<i64>, artist: Option<String>) -> Result<usize, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let a = none_if_blank(artist);
+    for id in &set_ids {
+        indexer::set_set_artist_override(&conn, *id, a.as_deref()).map_err(|e| e.to_string())?;
+    }
+    Ok(set_ids.len())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -64,6 +173,34 @@ struct PreviewInfo {
     peaks: serde_json::Value,
     confidence: f64,
     source: String,
+    /// Renderability report for worker renders of imperfect sets
+    /// (missing plugins / samples). Null = full fidelity.
+    fidelity: Option<serde_json::Value>,
+}
+
+/// Plugin inventory: a recursive bundle-filename scan (ms-fast; auval was
+/// removed after proving a black hole). Built lazily, refreshable on demand
+/// (Re-triage button rebuilds it so newly installed plugins are seen).
+static INVENTORY: std::sync::OnceLock<
+    std::sync::RwLock<std::sync::Arc<ops::triage::InstalledPlugins>>,
+> = std::sync::OnceLock::new();
+
+fn inventory_cell() -> &'static std::sync::RwLock<std::sync::Arc<ops::triage::InstalledPlugins>> {
+    INVENTORY.get_or_init(|| {
+        let inv = ops::triage::installed_plugins();
+        eprintln!("[triage] plugin inventory: {} names (folder scan)", inv.names.len());
+        std::sync::RwLock::new(std::sync::Arc::new(inv))
+    })
+}
+
+fn plugin_inventory() -> std::sync::Arc<ops::triage::InstalledPlugins> {
+    inventory_cell().read().unwrap().clone()
+}
+
+fn refresh_plugin_inventory() {
+    let fresh = std::sync::Arc::new(ops::triage::installed_plugins());
+    eprintln!("[triage] plugin inventory refreshed: {} names", fresh.names.len());
+    *inventory_cell().write().unwrap() = fresh;
 }
 
 /// Primary preview (audio path + waveform peaks) for a set, if any.
@@ -71,7 +208,7 @@ struct PreviewInfo {
 async fn preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
     let row = indexer::primary_preview(&conn, set_id).map_err(|e| e.to_string())?;
-    if let Some((audio_path, duration, peaks_json, confidence, source)) = row {
+    if let Some((audio_path, duration, peaks_json, confidence, source, fidelity_json)) = row {
         if !std::path::Path::new(&audio_path).exists() {
             let _ = indexer::remove_preview(&conn, set_id);
             return Err("Preview file was missing from disk and has been removed from the database.".to_string());
@@ -84,6 +221,7 @@ async fn preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
                 .unwrap_or(serde_json::Value::Array(vec![])),
             confidence,
             source,
+            fidelity: fidelity_json.and_then(|j| serde_json::from_str(&j).ok()),
         }))
     } else {
         Ok(None)
@@ -110,28 +248,86 @@ async fn cancel_scan(state: State<'_, ScanState>) -> Result<(), String> {
 
 struct ExportState {
     active: Arc<AtomicBool>,
+    tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl Default for ExportState {
     fn default() -> Self {
+        let (tx, _) = tokio::sync::watch::channel(false);
         Self {
             active: Arc::new(AtomicBool::new(false)),
+            tx,
         }
     }
 }
 
+/// Score unscored pending jobs in the background and refresh the UI when
+/// done. Detached (never awaited by enqueue commands) as a standing rule:
+/// nothing user-facing waits on enrichment work.
+fn spawn_job_scoring(app: tauri::AppHandle, refresh_inventory: bool) {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(p) = db_path() else { return };
+        let Ok(conn) = indexer::open(&p) else { return };
+        if refresh_inventory {
+            refresh_plugin_inventory();
+        }
+        let unscored = match indexer::unscored_pending_jobs(&conn) {
+            Ok(n) if n > 0 => n,
+            _ => return,
+        };
+        let installed = plugin_inventory();
+        eprintln!(
+            "[triage] {unscored} unscored job(s); scoring with {} known plugin names",
+            installed.names.len()
+        );
+        let t1 = std::time::Instant::now();
+        let mut log = |line: String| eprintln!("[triage] {line}");
+        match ops::triage::score_pending_jobs(&conn, &installed, &mut log) {
+            Ok(n) => {
+                eprintln!(
+                    "[triage] scored {n}/{unscored} job(s) in {:.1}s",
+                    t1.elapsed().as_secs_f32()
+                );
+                if n > 0 {
+                    let _ = app.emit("export-queue-updated", ());
+                }
+            }
+            Err(e) => eprintln!("[triage] scoring pass failed: {e}"),
+        }
+        // Full re-triage also re-stamps worker previews so the player/queue
+        // stop quoting fidelity computed by older logic.
+        if refresh_inventory {
+            let inv = plugin_inventory();
+            let mut log2 = |line: String| eprintln!("[triage] {line}");
+            match ops::triage::restamp_worker_previews(&conn, &inv, &mut log2) {
+                Ok(n) => {
+                    eprintln!("[triage] restamped {n} worker preview set(s)");
+                    let _ = app.emit("export-queue-updated", ());
+                }
+                Err(e) => eprintln!("[triage] restamp failed: {e}"),
+            }
+        }
+    });
+}
+
 #[tauri::command(rename_all = "snake_case")]
-async fn add_to_export_queue(set_id: i64) -> Result<(), String> {
+async fn add_to_export_queue(app: tauri::AppHandle, set_id: i64) -> Result<(), String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
-    indexer::add_export_job(&conn, set_id).map_err(|e| e.to_string())
+    indexer::add_export_job(&conn, set_id).map_err(|e| e.to_string())?;
+    let _ = app.emit("export-queue-updated", ());
+    spawn_job_scoring(app, false); // badges fill in when ready
+    Ok(())
 }
 
 /// Bulk export: queue renders for many sets at once (multi-select in the UI).
 /// Returns how many were actually queued (active renders are skipped).
 #[tauri::command(rename_all = "snake_case")]
-async fn add_to_export_queue_bulk(set_ids: Vec<i64>) -> Result<usize, String> {
+async fn add_to_export_queue_bulk(app: tauri::AppHandle, set_ids: Vec<i64>) -> Result<usize, String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
-    indexer::add_export_jobs_bulk(&conn, &set_ids).map_err(|e| e.to_string())
+    let queued = indexer::add_export_jobs_bulk(&conn, &set_ids).map_err(|e| e.to_string())?;
+    let _ = app.emit("export-queue-updated", ());
+    spawn_job_scoring(app, false);
+    Ok(queued)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -152,6 +348,25 @@ async fn clear_completed_jobs() -> Result<(), String> {
     indexer::clear_completed_export_jobs(&conn).map_err(|e| e.to_string())
 }
 
+/// Clear + recompute triage scores for pending jobs (user-triggered, e.g.
+/// after installing plugins or when scores look wrong).
+#[tauri::command(rename_all = "snake_case")]
+async fn retriage_jobs(app: tauri::AppHandle) -> Result<(), String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::clear_pending_job_scores(&conn).map_err(|e| e.to_string())?;
+    indexer::clear_finished_job_fidelity(&conn).map_err(|e| e.to_string())?;
+    let _ = app.emit("export-queue-updated", ()); // badges drop instantly…
+    spawn_job_scoring(app, true); // …and refill with a FRESH inventory
+    Ok(())
+}
+
+/// Clear the whole queue (a mid-render `processing` job survives).
+#[tauri::command(rename_all = "snake_case")]
+async fn clear_all_jobs() -> Result<usize, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    indexer::clear_all_export_jobs(&conn).map_err(|e| e.to_string())
+}
+
 #[tauri::command(rename_all = "snake_case")]
 async fn retry_failed_jobs() -> Result<(), String> {
     let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
@@ -161,6 +376,7 @@ async fn retry_failed_jobs() -> Result<(), String> {
 #[tauri::command(rename_all = "snake_case")]
 async fn toggle_export_queue(state: State<'_, ExportState>, active: bool) -> Result<(), String> {
     state.active.store(active, Ordering::Relaxed);
+    let _ = state.tx.send(active);
     Ok(())
 }
 
@@ -169,19 +385,39 @@ async fn get_export_queue_active(state: State<'_, ExportState>) -> Result<bool, 
     Ok(state.active.load(Ordering::Relaxed))
 }
 
+#[tauri::command(rename_all = "snake_case")]
+async fn create_proxy_set(set_id: i64) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+        let mut log = |line: String| eprintln!("[proxy] {line}");
+        let path = ops::proxy::create_proxy_set(&conn, set_id, &mut log).map_err(|e| e.to_string())?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 async fn export_worker_loop(app: tauri::AppHandle) {
+    let mut rx = {
+        let state = app.state::<ExportState>();
+        state.tx.subscribe()
+    };
+
     loop {
+        // 1. Wait for queue to be active
+        if !*rx.borrow() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+            if !*rx.borrow() {
+                continue;
+            }
+        }
+
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-        let active = {
-            if let Some(state) = app.try_state::<ExportState>() {
-                state.active.load(Ordering::Relaxed)
-            } else {
-                false
-            }
-        };
-
-        if !active {
+        // Re-check active after sleep
+        if !*rx.borrow() {
             continue;
         }
 
@@ -205,20 +441,13 @@ async fn export_worker_loop(app: tauri::AppHandle) {
             .map(|x| x.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        // 1. Mark as processing
+        // Mark as processing
         if let Err(_) = indexer::update_export_job_status(&conn, job_id, "processing", None) {
             continue;
         }
         let _ = app.emit("export-queue-updated", ());
 
-        // 2. Perform the export (saving inside the existing project folder next to the .als file)
         let als_parent = std::path::Path::new(&als_path).parent().unwrap().to_path_buf();
-
-        // Pre-flight (overwrite-dialog avoidance, user request 2026-06-11):
-        // if a render already exists next to the .als AND is at least as new
-        // as the set, skip Live entirely and just attach the existing file.
-        // Stale renders (set saved after the bounce) still re-render; the
-        // export script confirms any Replace dialog as a backstop.
         let expected_output = als_parent.join(format!("{}.wav", set_stem));
         let fresh_existing = (|| -> Option<bool> {
             let wav_m = std::fs::metadata(&expected_output).ok()?.modified().ok()?;
@@ -263,53 +492,175 @@ async fn export_worker_loop(app: tauri::AppHandle) {
         let live_app = live_app_path.to_string_lossy().into_owned();
         let output_dir_str = als_parent.to_string_lossy().into_owned();
 
+        let log_output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let log = {
+            let log_output = log_output.clone();
+            move |line: String| {
+                eprintln!("{line}");
+                let mut out = log_output.lock().unwrap();
+                out.push_str(&line);
+                out.push('\n');
+            }
+        };
+
         let mut error_msg = None;
         let mut success = false;
 
         if fresh_existing {
-            // Existing render is up to date — attach it, no Live involved.
+            log(format!("[worker] found fresh existing render: {}", expected_output.display()));
             success = true;
         } else {
-            // Run process
-            let status = tauri::async_runtime::spawn_blocking(move || {
-                std::process::Command::new("python3")
-                    .arg(&script_path)
-                    .arg("--set-path")
-                    .arg(&als_path)
-                    .arg("--output-dir")
-                    .arg(&output_dir_str)
-                    .arg("--live-app")
-                    .arg(live_app)
-                    .output()
-            })
-            .await;
+            let proxy_res = {
+                let db_p = db_path().unwrap();
+                let log_output_clone = log_output.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let conn = indexer::open(&db_p).map_err(|e| e.to_string())?;
+                    let mut l = |line: String| {
+                        let msg = format!("[worker-proxy] {line}");
+                        eprintln!("{msg}");
+                        let mut out = log_output_clone.lock().unwrap();
+                        out.push_str(&msg);
+                        out.push('\n');
+                    };
+                    ops::proxy::create_proxy_set(&conn, set_id, &mut l).map_err(|e| e.to_string())
+                }).await
+            };
 
-            match status {
-                Ok(Ok(output)) if output.status.success() => {
-                    success = true;
-                }
-                Ok(Ok(output)) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                    error_msg = Some(format!("Script failed: {stderr}"));
-                }
+            let (render_path, is_proxy) = match proxy_res {
+                Ok(Ok(p)) => (p, true),
                 Ok(Err(e)) => {
-                    error_msg = Some(format!("Failed to execute python3 script: {e}"));
+                    log(format!("[worker] proxy creation failed: {e}; falling back to original"));
+                    (als_path.into(), false)
                 }
                 Err(e) => {
-                    error_msg = Some(format!("Thread panic during command execution: {e}"));
+                    log(format!("[worker] proxy creation panicked: {e}"));
+                    (als_path.into(), false)
                 }
+            };
+
+            let (_, samples_raw) = indexer::set_render_inputs(&conn, set_id).unwrap_or_default();
+            let sample_paths: Vec<String> = samples_raw.into_iter().map(|(p, _)| p).collect();
+            if !sample_paths.is_empty() {
+                let sp = sample_paths.clone();
+                log(format!("[worker] checking/materializing {} samples", sp.len()));
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    ops::triage::materialize_icloud_samples(
+                        &sp,
+                        std::time::Duration::from_secs(180),
+                    )
+                })
+                .await;
+            }
+
+            let output_name = set_stem.clone();
+            use std::process::Stdio;
+            let mut child = Command::new("python3")
+                .arg(&script_path)
+                .arg("--set-path")
+                .arg(&render_path)
+                .arg("--output-dir")
+                .arg(&output_dir_str)
+                .arg("--output-name")
+                .arg(&output_name)
+                .arg("--live-app")
+                .arg(live_app)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+
+            match child.as_mut() {
+                Ok(c) => {
+                    let stdout = c.stdout.take().unwrap();
+                    let stderr = c.stderr.take().unwrap();
+                    let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(100);
+
+                    // Task to read stdout
+                    let log_tx_stdout = log_tx.clone();
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncBufReadExt;
+                        let mut reader = tokio::io::BufReader::new(stdout).lines();
+                        while let Ok(Some(line)) = reader.next_line().await {
+                            let _ = log_tx_stdout.send(format!("[script] {line}")).await;
+                        }
+                    });
+
+                    // Task to read stderr
+                    let log_tx_stderr = log_tx.clone();
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncBufReadExt;
+                        let mut reader = tokio::io::BufReader::new(stderr).lines();
+                        while let Ok(Some(line)) = reader.next_line().await {
+                            let _ = log_tx_stderr.send(format!("[script-err] {line}")).await;
+                        }
+                    });
+
+                    let timeout_dur = std::time::Duration::from_secs(720); // 12 mins
+                    let timeout = tokio::time::sleep(timeout_dur);
+                    tokio::pin!(timeout);
+
+                    loop {
+                        tokio::select! {
+                            res = c.wait() => {
+                                if let Ok(status) = res {
+                                    if status.success() {
+                                        success = true;
+                                    } else {
+                                        error_msg = Some(format!("Script failed with exit code {}", status.code().unwrap_or(-1)));
+                                    }
+                                } else {
+                                    error_msg = Some("Failed to wait for script".into());
+                                }
+                                break;
+                            }
+                            Some(line) = log_rx.recv() => {
+                                log(line);
+                            }
+                            _ = rx.changed() => {
+                                if !*rx.borrow() {
+                                    log("[worker] cancellation requested, killing export process".into());
+                                    let _ = c.kill().await;
+                                    error_msg = Some("Export cancelled by user".into());
+                                    break;
+                                }
+                            }
+                            _ = &mut timeout => {
+                                log("[worker] export script timed out (12m)".into());
+                                let _ = c.kill().await;
+                                error_msg = Some("Export timed out after 12 minutes".into());
+                                break;
+                            }
+                        }
+                    }
+
+                    // Drain remaining logs
+                    while let Ok(line) = log_rx.try_recv() {
+                        log(line);
+                    }
+                }
+                Err(e) => {
+                    error_msg = Some(format!("Failed to spawn export script: {e}"));
+                }
+            }
+
+            if is_proxy {
+                let _ = std::fs::remove_file(&render_path);
+                log(format!("[worker] deleted proxy set: {}", render_path.display()));
             }
         }
 
         if success {
             let audio_file = als_parent.join(format!("{}.wav", set_stem));
-
             let db_path_clone = db.clone();
             let ingest_result = tauri::async_runtime::spawn_blocking(move || {
                 let conn = indexer::open(&db_path_clone)?;
                 let meta = std::fs::metadata(&audio_file)?;
                 let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
                 let pk = previews::peaks::extract(&audio_file)?;
+                let inv = plugin_inventory();
+                let fidelity_json = ops::triage::renderability(&conn, set_id, &inv)
+                    .ok()
+                    .filter(|r| !r.missing_plugins.is_empty() || r.samples_missing > 0 || r.samples_evicted > 0)
+                    .and_then(|r| serde_json::to_string(&r).ok());
                 let row = indexer::PreviewRow {
                     set_id: Some(set_id),
                     project_id: Some(indexer::set_project_id(&conn, set_id)?),
@@ -320,22 +671,28 @@ async fn export_worker_loop(app: tauri::AppHandle) {
                     size: meta.len(),
                     duration: Some(pk.duration_secs),
                     peaks_json: Some(previews::peaks::to_json(&pk.peaks)),
+                    fidelity_json,
                 };
                 indexer::upsert_preview(&conn, &row)?;
                 indexer::update_export_job_status(&conn, job_id, "completed", None)?;
                 Ok::<(), anyhow::Error>(())
-            })
-            .await;
+            }).await;
 
             if let Err(e) = ingest_result {
-                let err_str = e.to_string();
+                let logs = log_output.lock().unwrap().clone();
+                let err_str = format!("Ingestion failed: {}\n\nLogs:\n{}", e, logs);
                 let _ = indexer::update_export_job_status(&conn, job_id, "failed", Some(&err_str));
             }
         } else {
             let err_str = error_msg.unwrap_or_else(|| "Unknown export error".into());
-            let _ = indexer::update_export_job_status(&conn, job_id, "failed", Some(&err_str));
+            if err_str == "Export cancelled by user" {
+                let _ = indexer::update_export_job_status(&conn, job_id, "failed", Some(&err_str));
+            } else {
+                let logs = log_output.lock().unwrap().clone();
+                let detailed_err = format!("{}\n\nLogs:\n{}", err_str, logs);
+                let _ = indexer::update_export_job_status(&conn, job_id, "failed", Some(&detailed_err));
+            }
         }
-
         let _ = app.emit("export-queue-updated", ());
     }
 }
@@ -364,6 +721,7 @@ async fn scan_folder(
             std::path::Path::new(&root),
             false,
             true,
+            None, // artist override: in-app scans rely on the path-based guess
             Some(&cancel_flag),
             &mut log,
         )
@@ -614,8 +972,14 @@ pub fn run() {
                 if let Ok(conn) = indexer::open(&db) {
                     let _ = indexer::reset_stale_export_jobs(&conn);
                     let _ = indexer::prune_stale_previews(&conn);
+                    // NOTE: scores are NOT cleared at launch (user decision
+                    // 2026-06-12) — once scored, jobs stay scored. Re-triage
+                    // button / `rescore` CLI are the explicit refresh paths.
                 }
             }
+            // Only jobs that never got scored (e.g. queued right before the
+            // last quit) are picked up here; already-scored jobs are skipped.
+            spawn_job_scoring(app.handle().clone(), false);
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 export_worker_loop(app_handle).await;
@@ -623,14 +987,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            search, inspect, stats, open_set, preview, scan_folder, cancel_scan, bulk_preview_scan,
+            search, list_artists, reindex_artists, set_artist, set_project_artist, set_artist_bulk,
+            get_lists, create_list, delete_list, rename_list, lists_for_set, add_set_to_list, remove_set_from_list,
+            inspect, stats, open_set, preview, scan_folder, cancel_scan, bulk_preview_scan,
             scan_set_folder_previews,
             add_to_export_queue, add_to_export_queue_bulk, get_export_queue, remove_from_export_queue,
-            clear_completed_jobs, toggle_export_queue, get_export_queue_active,
+            clear_completed_jobs, clear_all_jobs, retriage_jobs, toggle_export_queue, get_export_queue_active,
             retry_failed_jobs, remove_preview,
             add_watch_folder, remove_watch_folder, list_watch_folders,
             get_watch_suggestions, ignore_watch_suggestion, link_watch_suggestion,
-            link_watch_suggestions
+            link_watch_suggestions, create_proxy_set
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

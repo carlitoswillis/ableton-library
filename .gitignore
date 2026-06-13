@@ -18,3 +18,7 @@ app/src-tauri/gen/
 *.db
 *.db-shm
 *.db-wal
+__pycache__/
+
+# debug dumps
+triage.txt

@@ -15,6 +15,7 @@ type ScanSummary = {
 type SearchHit = {
   set_id: number;
   project: string;
+  artist: string | null;
   als_path: string;
   tempo: number | null;
   tempos: number[];
@@ -22,7 +23,10 @@ type SearchHit = {
   live_version: string | null;
   has_preview: boolean;
   preview_duration: number | null;
+  in_list: boolean;
 };
+
+type ListInfo = [number, string, number]; // [id, name, item_count]
 
 const formatTempo = (tempo: number | null, tempos: number[] | undefined) => {
   if (tempos && tempos.length > 1) {
@@ -47,6 +51,7 @@ type PreviewInfo = {
   peaks: number[];
   confidence: number;
   source: string;
+  fidelity: Fidelity | null;
 };
 
 type ExportJob = {
@@ -59,6 +64,35 @@ type ExportJob = {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  score: number | null;
+  fidelity: string | null; // JSON Renderability report
+};
+
+type Fidelity = {
+  score: number;
+  plugins_total: number;
+  missing_plugins: string[];
+  samples_total: number;
+  samples_missing: number;
+  samples_evicted: number;
+};
+
+const parseFidelity = (j: string | null | undefined): Fidelity | null => {
+  if (!j) return null;
+  try {
+    return JSON.parse(j) as Fidelity;
+  } catch {
+    return null;
+  }
+};
+
+const fidelitySummary = (f: Fidelity): string => {
+  const parts: string[] = [];
+  if (f.missing_plugins.length)
+    parts.push(`missing plugins: ${f.missing_plugins.join(", ")}`);
+  if (f.samples_missing) parts.push(`${f.samples_missing} samples missing`);
+  if (f.samples_evicted) parts.push(`${f.samples_evicted} samples in iCloud`);
+  return parts.join(" · ");
 };
 
 type Suggestion = {
@@ -75,6 +109,9 @@ type Suggestion = {
 type Detail = {
   set_id: number;
   project: string;
+  artist?: string | null;
+  artist_override?: string | null;
+  project_artist?: string | null;
   als_path: string;
   live_version: string | null;
   tempo: number | null;
@@ -97,6 +134,16 @@ export default function App() {
   const [minBpm, setMinBpm] = useState("");
   const [maxBpm, setMaxBpm] = useState("");
   const [plugin, setPlugin] = useState("");
+  const [artist, setArtist] = useState("");
+  const [artistDraft, setArtistDraft] = useState("");
+  const [bulkArtist, setBulkArtist] = useState("");
+  // Lists (favorites + collections)
+  const [lists, setLists] = useState<ListInfo[]>([]);
+  const [listFilter, setListFilter] = useState(""); // "" = all, else list id as string
+  const [listMenuSet, setListMenuSet] = useState<number | null>(null); // star popover target
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [menuMemberships, setMenuMemberships] = useState<Set<number>>(new Set());
+  const [newListName, setNewListName] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -138,6 +185,8 @@ export default function App() {
         min_bpm: minBpm ? parseFloat(minBpm) : null,
         max_bpm: maxBpm ? parseFloat(maxBpm) : null,
         plugin: plugin || null,
+        artist: artist || null,
+        list_id: listFilter ? parseInt(listFilter) : null,
         sort_by: sortBy || null,
         date_modified: dateModified || null,
         date_scanned: dateScanned || null,
@@ -147,7 +196,62 @@ export default function App() {
     } catch (e) {
       setError(String(e));
     }
-  }, [text, minBpm, maxBpm, plugin, sortBy, dateModified, dateScanned, hasPreviewFilter]);
+  }, [text, minBpm, maxBpm, plugin, artist, listFilter, sortBy, dateModified, dateScanned, hasPreviewFilter]);
+
+  const refreshLists = useCallback(() => {
+    invoke<ListInfo[]>("get_lists").then(setLists).catch((e) => setError(String(e)));
+  }, []);
+
+  // Open the star popover for a set: position it next to the clicked star
+  // (a fixed-position popup so the table/row never clips it), load memberships.
+  const openListMenu = async (setId: number, anchor: HTMLElement) => {
+    const r = anchor.getBoundingClientRect();
+    const W = 240;
+    const x = Math.min(r.left, window.innerWidth - W - 12);
+    const y = Math.min(r.bottom + 4, window.innerHeight - 240);
+    setMenuPos({ x: Math.max(8, x), y: Math.max(8, y) });
+    setNewListName("");
+    try {
+      const ids = await invoke<number[]>("lists_for_set", { set_id: setId });
+      setMenuMemberships(new Set(ids));
+      setListMenuSet(setId);
+      refreshLists();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  // Toggle a set's membership in a list from the popover.
+  const toggleMembership = async (listId: number, setId: number, isMember: boolean) => {
+    try {
+      const cmd = isMember ? "remove_set_from_list" : "add_set_to_list";
+      await invoke(cmd, { list_id: listId, set_id: setId });
+      setMenuMemberships((prev) => {
+        const next = new Set(prev);
+        if (isMember) next.delete(listId); else next.add(listId);
+        return next;
+      });
+      refreshLists();
+      runSearch();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const createListAndAdd = async (setId: number) => {
+    const name = newListName.trim();
+    if (!name) return;
+    try {
+      const id = await invoke<number>("create_list", { name });
+      await invoke("add_set_to_list", { list_id: id, set_id: setId });
+      setMenuMemberships((prev) => new Set(prev).add(id));
+      setNewListName("");
+      refreshLists();
+      runSearch();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   // Debounced live search.
   useEffect(() => {
@@ -310,6 +414,27 @@ export default function App() {
     }
   };
 
+  const retriageJobs = async () => {
+    try {
+      setError(null);
+      await invoke("retriage_jobs");
+      refreshQueue();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const clearAllJobs = async () => {
+    try {
+      setError(null);
+      await invoke("clear_all_jobs");
+      refreshQueue();
+      refreshStats();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const retryFailed = async () => {
     try {
       setError(null);
@@ -336,7 +461,8 @@ export default function App() {
     refreshQueue();
     refreshWatchFolders();
     refreshSuggestions();
-  }, [refreshStats, refreshQueue, refreshWatchFolders, refreshSuggestions]);
+    refreshLists();
+  }, [refreshStats, refreshQueue, refreshWatchFolders, refreshSuggestions, refreshLists]);
 
   useEffect(() => {
     let active = true;
@@ -640,11 +766,46 @@ export default function App() {
     try {
       const d = await invoke<Detail>("inspect", { set_id: id });
       setDetail(d);
+      // Prefill the artist editor with this set's OWN override (blank if it's
+      // only inheriting the project's derived artist).
+      setArtistDraft(d.artist_override ?? "");
       if (d.preview_missing) {
         setError("Note: The preview file was missing from disk and has been removed from the database.");
         runSearch();
         refreshStats();
       }
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  // Manual artist assignment. `scope` 'set' overrides just this set; 'project'
+  // tags the whole folder. Blank draft clears.
+  const saveArtist = async (scope: "set" | "project") => {
+    if (!detail) return;
+    try {
+      const value = artistDraft.trim() || null;
+      const cmd = scope === "set" ? "set_artist" : "set_project_artist";
+      await invoke(cmd, { set_id: detail.set_id, artist: value });
+      await openDetail(detail.set_id);
+      runSearch();
+      refreshStats();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const tagSelectedArtist = async () => {
+    try {
+      const value = bulkArtist.trim() || null;
+      const n = await invoke<number>("set_artist_bulk", {
+        set_ids: [...selected],
+        artist: value,
+      });
+      setScanMsg(`${value ? "Tagged" : "Cleared artist on"} ${n} set${n === 1 ? "" : "s"}`);
+      setBulkArtist("");
+      runSearch();
+      refreshStats();
     } catch (e) {
       setError(String(e));
     }
@@ -837,7 +998,10 @@ export default function App() {
       setTrack({
         setId: h.set_id,
         title: fileName(h.als_path).replace(/\.als$/, ""),
-        subtitle: `${h.project} · ${p.source}${p.confidence < 0.85 ? ` (${Math.round(p.confidence * 100)}% match)` : ""}`,
+        subtitle:
+          `${h.project} · ${p.source}` +
+          (p.confidence < 0.85 ? ` (${Math.round(p.confidence * 100)}% match)` : "") +
+          (p.fidelity && fidelitySummary(p.fidelity) ? ` · ⚠ ${fidelitySummary(p.fidelity)}` : ""),
         src: convertFileSrc(p.audio_path),
         peaks: p.peaks,
         duration: p.duration,
@@ -862,6 +1026,25 @@ export default function App() {
         {scanMsg && <span className="scan-msg">{scanMsg}</span>}
         <button className="scan-btn" onClick={pickAndScan} disabled={scanning}>
           {scanning ? "Scanning…" : "Scan folder…"}
+        </button>
+        <button
+          className="scan-btn"
+          style={{ marginLeft: "10px" }}
+          disabled={scanning}
+          title="Re-derive artists from project paths already in the catalog — no scanning"
+          onClick={async () => {
+            try {
+              setError(null);
+              const n = await invoke<number>("reindex_artists");
+              setScanMsg(`Reindexed artists: ${n} project(s) tagged`);
+              runSearch();
+              refreshStats();
+            } catch (e) {
+              setError(String(e));
+            }
+          }}
+        >
+          Reindex Artists
         </button>
         <button className="scan-btn" onClick={bulkPreviewScan} disabled={scanning} style={{ marginLeft: "10px" }} title="Match unmatched sets against their project folders and watch folders">
           {scanning ? "Scanning Previews…" : "Scan Previews…"}
@@ -933,6 +1116,23 @@ export default function App() {
           value={plugin}
           onChange={(e) => setPlugin(e.target.value)}
         />
+        <input
+          className="plugin"
+          placeholder="artist…"
+          value={artist}
+          onChange={(e) => setArtist(e.target.value)}
+        />
+        <select
+          className="sort-select"
+          value={listFilter}
+          onChange={(e) => setListFilter(e.target.value)}
+          title="Show only sets in a list"
+        >
+          <option value="">All lists</option>
+          {lists.map(([id, name, count]) => (
+            <option key={id} value={String(id)}>★ {name} ({count})</option>
+          ))}
+        </select>
         <select
           className="sort-select"
           value={sortBy}
@@ -940,6 +1140,7 @@ export default function App() {
         >
           <option value="modified">Recently Edited</option>
           <option value="name">Alphabetical (A-Z)</option>
+          <option value="artist">Artist (A-Z)</option>
           <option value="bpm">Tempo (BPM)</option>
           <option value="previews">With Previews First</option>
         </select>
@@ -954,18 +1155,6 @@ export default function App() {
           <option value="yesterday">Created Yesterday</option>
           <option value="week">Created This Week</option>
           <option value="month">Created This Month</option>
-        </select>
-        <select
-          className="sort-select"
-          value={dateScanned}
-          onChange={(e) => setDateScanned(e.target.value)}
-          style={{ width: "135px" }}
-        >
-          <option value="">Any Time Scanned</option>
-          <option value="today">Scanned Today</option>
-          <option value="yesterday">Scanned Yesterday</option>
-          <option value="week">Scanned This Week</option>
-          <option value="month">Scanned This Month</option>
         </select>
         <select
           className="sort-select"
@@ -1015,6 +1204,21 @@ export default function App() {
                   >
                     Queue {selected.size} render{selected.size === 1 ? "" : "s"}
                   </button>
+                  <input
+                    className="plugin"
+                    placeholder="artist…"
+                    value={bulkArtist}
+                    onChange={(e) => setBulkArtist(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") tagSelectedArtist(); }}
+                    style={{ width: 130 }}
+                  />
+                  <button
+                    className="play-btn"
+                    onClick={tagSelectedArtist}
+                    title="Set the artist on all selected sets (empty clears)"
+                  >
+                    Tag {selected.size}
+                  </button>
                   <button className="play-btn" onClick={() => setSelected(new Set())}>
                     Clear
                   </button>
@@ -1041,6 +1245,23 @@ export default function App() {
                     }
                   }}
                 >
+                  <td
+                    className="star"
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ width: 24, textAlign: "center", cursor: "pointer" }}
+                  >
+                    <span
+                      title={h.in_list ? "In a list — click to edit" : "Add to a list"}
+                      onClick={(e) => openListMenu(h.set_id, e.currentTarget as HTMLElement)}
+                      style={{
+                        color: h.in_list ? "var(--accent, #e6b800)" : "var(--muted, #888)",
+                        fontSize: "1.1em",
+                        userSelect: "none",
+                      }}
+                    >
+                      {h.in_list ? "★" : "☆"}
+                    </span>
+                  </td>
                   <td className="sel" onClick={(e) => e.stopPropagation()}>
                     <input
                       type="checkbox"
@@ -1052,7 +1273,12 @@ export default function App() {
                       }}
                     />
                   </td>
-                  <td className="proj">{h.project}</td>
+                  <td className="proj">
+                    {h.project}
+                    {h.artist && (
+                      <span style={{ opacity: 0.55, marginLeft: 6 }}>· {h.artist}</span>
+                    )}
+                  </td>
                   <td className="set">{fileName(h.als_path)}</td>
                   <td className="num">{formatTempo(h.tempo, h.tempos)} bpm</td>
                   <td className="num">{h.time_signature ?? "?"}</td>
@@ -1154,9 +1380,31 @@ export default function App() {
               )}
             </div>
             <p className="meta">
-              {detail.project} · {formatTempo(detail.tempo, detail.tempos)} bpm · {detail.time_signature ?? "?"} ·{" "}
+              {detail.project}
+              {detail.artist ? ` · ${detail.artist}` : ""} · {formatTempo(detail.tempo, detail.tempos)} bpm · {detail.time_signature ?? "?"} ·{" "}
               {detail.live_version ?? "unknown version"}
             </p>
+            <div className="artist-editor" style={{ display: "flex", alignItems: "center", gap: 6, margin: "4px 0 10px", flexWrap: "wrap" }}>
+              <span style={{ opacity: 0.7 }}>Artist:</span>
+              <input
+                value={artistDraft}
+                placeholder={detail.project_artist ? `${detail.project_artist} (from path)` : "unassigned"}
+                onChange={(e) => setArtistDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") saveArtist("set"); }}
+                style={{ width: 160 }}
+              />
+              <button className="open-btn" onClick={() => saveArtist("set")} title="Set the artist for just this set">
+                Save (this set)
+              </button>
+              <button className="open-btn" onClick={() => saveArtist("project")} title="Set the artist for every set in this project folder">
+                Apply to project
+              </button>
+              {detail.artist_override && (
+                <span style={{ opacity: 0.55, fontSize: "0.85em" }}>
+                  overriding {detail.project_artist ? `path "${detail.project_artist}"` : "(no path artist)"}
+                </span>
+              )}
+            </div>
             {detail.preview_missing && (
               <p className="warn">⚠ The preview file was missing from disk and has been removed from the database.</p>
             )}
@@ -1350,9 +1598,21 @@ export default function App() {
                           <div className="queue-job-path" title={job.als_path}>
                             {job.als_path.split("/").pop()}
                           </div>
+                          {(() => {
+                            const f = parseFidelity(job.fidelity);
+                            return f && fidelitySummary(f) ? (
+                              <div className="job-fidelity" title={fidelitySummary(f)}>
+                                ⚠ {fidelitySummary(f)}
+                              </div>
+                            ) : null;
+                          })()}
                           {job.error && (
-                            <div className="job-error-text">
-                              Error: {job.error}
+                            <div className="job-error-container">
+                              {console.log("Job Error:", job.error)}
+                              <div className="job-error-header">Error:</div>
+                              <pre className="job-error-pre">
+                                {job.error}
+                              </pre>
                             </div>
                           )}
                         </td>
@@ -1360,6 +1620,14 @@ export default function App() {
                           <span className={`status-badge ${job.status}`}>
                             {job.status}
                           </span>
+                          {job.score != null && job.status === "pending" && (
+                            <span
+                              className={`score-badge ${job.score >= 0.9 ? "good" : job.score >= 0.6 ? "ok" : "bad"}`}
+                              title="Renderability — easy sets render first"
+                            >
+                              {Math.round(job.score * 100)}%
+                            </span>
+                          )}
                         </td>
                         <td className="job-actions">
                           {(job.status === "failed" || job.status === "processing") && (
@@ -1391,6 +1659,15 @@ export default function App() {
               <button
                 className="open-btn ghost"
                 style={{ marginRight: "10px" }}
+                onClick={retriageJobs}
+                disabled={!queue.some(j => j.status === 'pending')}
+                title="Recompute renderability scores with a fresh plugin inventory"
+              >
+                Re-triage
+              </button>
+              <button
+                className="open-btn ghost"
+                style={{ marginRight: "10px" }}
                 onClick={retryFailed}
                 disabled={!queue.some(j => j.status === 'failed')}
               >
@@ -1398,11 +1675,20 @@ export default function App() {
               </button>
               <button
                 className="open-btn ghost"
-                style={{ marginRight: "auto" }}
+                style={{ marginRight: "10px" }}
                 onClick={clearCompleted}
                 disabled={!queue.some(j => j.status === 'completed' || j.status === 'failed')}
               >
                 Clear Done / Failed
+              </button>
+              <button
+                className="open-btn ghost"
+                style={{ marginRight: "auto" }}
+                onClick={clearAllJobs}
+                disabled={!queue.some(j => j.status !== 'processing')}
+                title="Empty the queue (a render in progress is kept until it finishes)"
+              >
+                Clear All
               </button>
               <button
                 className="open-btn"
@@ -1676,6 +1962,62 @@ export default function App() {
       )}
 
       {track && <PlayerBar track={track} onClose={() => setTrack(null)} />}
+
+      {listMenuSet !== null && (
+        <>
+          <div
+            onClick={() => setListMenuSet(null)}
+            style={{ position: "fixed", inset: 0, zIndex: 1000 }}
+          />
+          <div
+            className="list-menu"
+            style={{
+              position: "fixed", left: menuPos.x, top: menuPos.y, zIndex: 1001,
+              width: 240, textAlign: "left", padding: 10,
+              background: "var(--panel, #1e1e1e)", border: "1px solid var(--border, #444)",
+              borderRadius: 8, boxShadow: "0 8px 28px rgba(0,0,0,0.5)",
+              maxHeight: "min(60vh, 360px)", overflowY: "auto",
+            }}
+          >
+            <div style={{ fontSize: "0.8em", opacity: 0.6, marginBottom: 6 }}>Add to lists</div>
+            {lists.length === 0 && (
+              <div style={{ fontSize: "0.85em", opacity: 0.6, padding: "4px 0" }}>
+                No lists yet — create one below.
+              </div>
+            )}
+            {lists.map(([id, name, count]) => {
+              const member = menuMemberships.has(id);
+              return (
+                <label key={id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={member}
+                    onChange={() => listMenuSet !== null && toggleMembership(id, listMenuSet, member)}
+                  />
+                  <span style={{ flex: 1 }}>{name}</span>
+                  <span style={{ opacity: 0.45, fontSize: "0.8em" }}>{count}</span>
+                </label>
+              );
+            })}
+            <div style={{ display: "flex", gap: 4, marginTop: 8, borderTop: "1px solid var(--border, #444)", paddingTop: 8 }}>
+              <input
+                placeholder="new list…"
+                value={newListName}
+                autoFocus
+                onChange={(e) => setNewListName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && listMenuSet !== null) createListAndAdd(listMenuSet); }}
+                style={{ flex: 1, minWidth: 0 }}
+              />
+              <button
+                className="open-btn"
+                onClick={() => listMenuSet !== null && createListAndAdd(listMenuSet)}
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </>
+      )}
 
     </div>
   );

@@ -1,5 +1,5 @@
 # AI Context Bundle
-Generated: Fri Jun 12 19:07:23 UTC 2026
+Generated: Sat Jun 13 01:54:48 UTC 2026
 
 ## ⚠️ Agent Navigation Guide
 1. Start with the **Current State** below to understand the focus.
@@ -58,7 +58,12 @@ Ableton Library is a metadata and preview indexing system for Ableton projects, 
 crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot; discovery  [BUILT, verified]
 crates/previews/   # lib: render discovery, name matching, symphonia peaks  [BUILT]
 crates/indexer/    # lib: SQLite (rusqlite + FTS5) storage; pure, no workflow logic  [BUILT, verified]
-crates/ops/        # lib: workflows (scan_library, hunt_renders, attach) shared by cli + app; multi-threaded  [BUILT]
+crates/ops/        # lib: workflows shared by cli + app; multi-threaded  [BUILT]
+                   #   lib.rs: scan_library, hunt_renders, attach
+                   #   triage.rs: plugin inventory, renderability scoring, iCloud materialize, symlink relink (CLI-only)
+                   #   sample_index.rs: budgeted recursive audio index, tiered fuzzy lookup
+                   #   places.rs: Ableton Library.cfg "Places" parsing
+                   #   proxy.rs: relink planning + proxy .als writer (worker render path)
 crates/cli/        # bin: `ableton-scan` — thin wrappers over ops/indexer  [BUILT, verified]
 tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
 app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: symphonia for waveform peaks
@@ -125,7 +130,36 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
 ## 3. Project State (PROJECT_STATE.md)
 # Project State
 
-## ⚡ HANDOFF SNAPSHOT (2026-06-11, end of session — read this first)
+## ⚡ HANDOFF SNAPSHOT v3 (2026-06-13 — read this first)
+- **✅✅ GREEN RUNS CONFIRMED (2026-06-13, user: "its working super great right now!!!!")**: the export worker renders previews end-to-end. The dismissal fix (28e010d, text-field check instead of window-index existence) was the final unlock — renders had been succeeding while the script false-failed them. M4's core loop is FUNCTIONAL: triage -> proxy w/ relinked samples -> Live renders -> preview attached. The contradiction below is therefore resolved in favor of the CURRENT code (full-path AX set works on this macOS version); keep the entry for history.
+- **~~⚠ UNRESOLVED CONTRADICTION~~ (resolved above, kept for context)**: the "SAVE PATH CORRECTION" entry below (from a parallel session) says AX-setting the FULL PATH into the save panel's name field does NOT resolve as a path (literal path-named files in the default folder). But the CURRENT code (tools/export_set.py as of 28e010d/058a15b) uses exactly that full-path approach, and the latest narrated logs show it reaching Replace+confirm. TO ADJUDICATE: run one render, then check (a) did the .wav land NEXT TO the .als in the project folder? (b) or did a file named like a whole path appear in the default save folder? If (b), implement the correction entry's design: Go-To panel for the DIRECTORY (AX-set its field, verify it opened), name field for FILENAME only.
+- **Current code state**: save flow = wait for panel (sheet OR dialog window, 60s) -> 2.5s settle -> AX-set full path in name field -> return -> Replace handled (incl. sheet-of-dialog-panel) -> dismissal = panel's TEXT FIELD gone (NOT window existence — progress dialog reoccupies the window index; this false-failed runs while renders were succeeding, the session's key breakthrough). All AppleScript narration now actually emits ([AS] lines via osascript `log`; do-shell-echo swallowed everything before).
+- **Verified working in real logs**: proxy creation, folder-move + fuzzy sample relink, places indexing w/ budgets, export trigger, Replace click, cancellation, narration. **Not yet verified**: a clean green render end-to-end after the dismissal fix; "told u so"-class sets where the save panel never appears (likely Live still loading old sets — diagnose from [AS] narration).
+- **Tech debt state**: cargo warnings all fixed (5807c1e); README current (058a15b); known accepted debt: duplicated mtime closures across crates, symlink relink kept as explicit CLI tool only.
+- **Working agreements unchanged**: user gives product feedback, agent writes all code, user's Mac is the only build/test host; budget + narrate ALL unbounded work; get log dumps BEFORE fixes; update /ai + commit every step.
+
+## HANDOFF SNAPSHOT v2 (2026-06-12 — older session log below)
+- **✅ RELINK REDESIGN (Completed 2026-06-12)**: Relinking now uses **Proxy Sets** (ephemeral `.als` copies in the app cache with absolute path rewriting). Original projects are untouched. No symlinks used for auto-export.
+- **✅ ABLETON PLACES (Completed 2026-06-12)**: `Library.cfg` is parsed to find user-pinned folders, used as priority search roots for missing samples (especially project-local moves).
+- **✅ EXPORT WORKER VISIBILITY (Completed 2026-06-12)**: Addressed "stall" perception by injecting real-time logs from the pre-flight sample relinker into the UI logs. Confirmed the worker was active, not stalled, during relinking/iCloud materialization.
+- **✅ EXPORT SCRIPT ROBUSTNESS (Completed 2026-06-12)**: Added pre-flight safety checks (directory/file collision detection) and a 5-second interruptible pause to prevent automation mishaps. Replaced hazardous `Cmd+D` closing shortcut with safer `Esc` key.
+- **SAVE PATH CORRECTION (2026-06-13)**: AX `set value` of the FULL PATH into the name field does NOT resolve as a path — NSSavePanel treats it as a literal filename and dumps it in the DEFAULT folder (user found default dir littered with files named after whole paths). So Cmd+Shift+G IS required, just done right: open Go-To, WAIT for + verify its field (text field/combo box of sheet of savePanel), set the DIRECTORY there, return, then set ONLY the filename in the name field. The earlier "simplify, remove Go-To" instinct was half right (kill the blind retries) but the path-in-name-field shortcut was invalid. Now: Go-To for dir + name field for filename, both AX-set with keystroke fallback.
+- **EXPORT BREAKTHROUGH (2026-06-13, narrated logs + user observation)**: exports were SUCCEEDING — the dismissal check was false-failing them. `savePanel` is an index-based AX reference; when the save panel closes, Live's render-PROGRESS dialog occupies the same window index -> `exists savePanel` stayed true -> script errored while the render ran -> worker started the NEXT set into a busy Live (chaos user observed). FIX (28e010d): dismissal = panel's TEXT FIELD gone (name box exists only on save panel, not progress dialog). Replace-on-dialog-panel fix from previous round confirmed working in trace ("Clicking Replace (sheet of save panel)"). Python file-wait (10min) was already correct. The full chain has now been OBSERVED working through Replace+confirm; expect green runs.
+- **EXPORT DEBUG ROUND (2026-06-13, from real worker logs — finally)**: (1) ALL AppleScript narration was silently swallowed: `do shell script "echo"` CAPTURES its output. Fixed: osascript `log` statements (stderr) + python always surfaces stderr lines as [AS]. Every future failure now shows its exact stage. (2) binge2 "panel still open": Replace dialog hangs off the savePanel (dialog-window case), handlers only checked window-1 sheets — fixed, savePanel sheet checked first. (3) "told u so" = "save panel never appeared": Live likely still loading/relocating the old set when export keystrokes fired — UNFIXED; diagnose from new [AS] narration next run. Possible related edge (noted earlier): sets with empty arrangement may export differently. Pipeline otherwise proven: relink finds moved folders + fuzzy matches (logs show real wins), proxy renders, cancellation works.
+- **SAVE DIALOG: FINAL APPROACH (2026-06-13, after 3 rounds of Cmd+Shift+G babysitting)**: Go-To dance REMOVED entirely. The method: wait for NSSavePanel sheet -> 2.5s settle -> AX `set value of text field 1 of sheet 1 of window 1` to the FULL ABSOLUTE output path -> return -> replace-dialog handling -> verify sheet dismissed (20s, hard error). No navigation, no shortcuts to swallow. Keystroke typing of the full path survives only as on-error fallback. Lesson: automation should set state directly, not reenact human UI choreography.
+- **STALL INCIDENT #4 (2026-06-13, save-dialog stage — "got to exporting fine, got lost typing path/filename")**: export_set.py's save-sheet sequence was blind keystrokes with fixed delays: (a) no wait for the NSSavePanel sheet to exist (slow sheet -> Cmd+Shift+G + path typed into the void), (b) filename typed WITHOUT Cmd+A first (field holds default name -> appended garbage), (c) no confirmation the sheet dismissed (script "succeeds" while sheet sits open -> 12min worker timeout). FIXED: poll for sheet existence (60s budget, hard error w/ message), Cmd+A before filename, poll for sheet dismissal (20s budget, hard error). Live's own export-settings dialog is custom-drawn/invisible to accessibility — only the native save sheet is checkable. Same standing rule as #3: never type blind, verify state, narrate.
+- **STALL INCIDENT #3 (2026-06-13, "it just got stuck again")**: unbounded SampleIndex walk — Places can include huge roots (and Library.cfg parsing also collects ProjectPath entries, possibly the user's whole iCloud projects tree); full recursion with no budget = silent multi-minute hang. FIX (5a741a5): 20s wall / 250k entry budgets (truncate + log, never hang), per-root "indexing X… done in Ns" progress lines (the slow root is now identifiable), over-broad roots ("/", volume roots, home dir) skipped. STANDING RULE (third occurrence — auval, queue-button, now this): ANY unbounded filesystem/external work MUST have a budget and narrate progress. Follow-up worth considering: review places.rs — should ProjectPath entries be search roots at all, or only UserFolderInfo?
+- [x] ~~SAMPLE RELINKING LIMITATIONS~~ FIXED (2026-06-13): new `ops::sample_index` — Places (+roots) walked ONCE, fully recursive (no depth cap; skips hidden/Backup/Project Info), indexed by normalized stem. Lookup tiers mirror Live's browser: exact filename > same stem w/ alternative audio extension > fuzzy stem (squashed equality/containment, similarity >= 0.75; fuzzy only when strict tiers empty). plan_relink now: folder-move voting via index parents (folder rewrites still require exact names — fuzzy hits resolve per-file, where the proxy can point at a differently-named file); per-file candidates = project-local > catalog exact > index tiers; "fuzzy relink"/"unresolved" lines logged. Index built only when something is missing. VERIFY on host: `ableton-scan proxy "<set with moved samples>"` and watch the [proxy] log.
+- **BACKLOG: BETA ISOLATION**: Use a dedicated Ableton Live Beta instance for background renders to isolate "Recent Sets" history from the main Suite.
+- **✅ CLEAN PROXY NAMES**: Exports from proxy sets now have the correct project name (no "(preview proxy)" suffix) and link automatically.
+- **✅ AUTO-CLEANUP**: Proxy sets are deleted from cache immediately after render.
+
+- **State of M4a/M4b-lite (all BUILT, awaiting user verification on host)**: triage scoring w/ folder-scan inventory (auval REMOVED — see gotchas below), easy-first queue, score badges + fidelity warnings in queue UI, Re-triage button (rebuilds inventory + rescores + restamps worker previews), CLI: triage/--show-inventory, rescore, relink. Worker pre-flight: (1) sample relink via catalog-as-search-index symlinks, (2) brctl iCloud materialize, then renders via tools/export_set.py.
+- **Matching lessons (HARD-WON, do not regress)**: space-squash comparison (LittlePlate.bundle vs "Little Plate" — THE root cause of false missings, found via user's triage --show-inventory dump); Apple AUs always present; recursive plugin-dir scan; vendor app dirs (Waves/Soundtoys/KORG/...); regression tests in ops::triage::tests use the user's real inventory data.
+- **Scoring lifecycle (user decision)**: scored stays scored — NO clearing at launch; launch only scores never-scored jobs; Re-triage/rescore = explicit refresh; re-triage scrubs stale fidelity everywhere (finished jobs cleared, worker previews restamped).
+- **Debug loop that works**: when user reports wrong triage -> `ableton-scan triage "<set>" --show-inventory` + grep BEFORE attempting fixes. Three blind fixes were burned before this; don't repeat.
+
+## ⚡ HANDOFF SNAPSHOT v1 (2026-06-11 — older but still-valid working agreements)
 - **Where things stand**: M1 (extraction) + M2 (catalog) + UI skeleton DONE and verified on the user's Mac. M3 previews: fully built (discovery, matching, peaks, player bar, in-app folder-picker scanning), but **awaiting user verification** of (a) the async/spawn_blocking UI-freeze fix (beach ball occurred on first in-app scan; fix committed 72ae0a1, not yet re-tested), (b) the matcher against real bounces (user's plan: `reset --yes`, bounce current-year tracks to one folder, scan 2026 projects in-app or via CLI, then `previews <bounce folder> --verbose`), and (c) the unified scan/decode work queue (user observed scans stalling on preview decode; fixed, needs rebuild + re-test).
 - **Working style**: user is NOT writing Rust (decided after the fact — AI writes all code, user compiles/tests on their Mac and gives product feedback). The sandbox cannot run cargo (network allowlist); ALL Rust verification happens on the user's machine. Keep tools/reference_extract.py in sync with any als-core parser change.
 - **Cadence that works**: user gives product feedback/requests -> implement -> commit with descriptive message -> user pulls, builds, tests -> log results + decisions here. Update these context files and commit at every meaningful step (project instruction).
@@ -156,8 +190,16 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 - [ ] **NEXT (user's test plan)**: dump db (`ableton-scan reset --yes`), bounce some current-year tracks into one folder, `scan` the matching projects + `previews` that folder, evaluate match quality from a controlled sample. NO full-system hunt (user explicitly declined).
 - [ ] Later in M3: previews in detail pane — list ALL of a set's previews, switch primary, manual attach/replace from the UI (user asked "what if i want to update the preview?": re-bounce to same path = auto-replaced on rescan via mtime; new file = new row, newest wins at equal confidence; `attach` = manual trump at 1.0 — UI affordance for all this still missing). Also: historical preview archive, in-app "hunt for previews" UI.
 - [~] M4 IN PROGRESS (user corrected status 2026-06-12 — do NOT mark complete): mechanism built (export_jobs table schema v3, worker loop polling every 3s when Auto-Export active, tools/export_set.py drives Live, renders attached source=worker conf=1.0) but real-world rendering of OLD projects is the unsolved part. Field findings: iCloud-evicted samples stall/slow bounces; missing plugins (incl. synths) = silent tracks; moved-but-findable samples force Live's slow relocate scan. Renders can be both slow AND missing a ton.
-- [ ] M4a (next, catalog-driven, no .als modification): renderability score per set (we already index plugins + samples); worker queue easy-first; pre-flight iCloud download (brctl) of project samples before bounce; fidelity metadata on worker previews ("missing: Serum, soothe2") surfaced in UI.
-- [ ] M4b: preview-PROXY sets — write a transformed COPY (never the original): bypass/remove missing effects, relink sample FileRefs to located copies (we can rewrite the XML we already parse).
+- [x] M4a BUILT (2026-06-12, awaiting host verification): schema v6 (export_jobs.score/fidelity, previews.fidelity); ops::triage module — installed-plugin inventory (`auval -a` + VST/VST3 dirs, fuzzy-matched generously so false "missing" is rare; cached per process via OnceLock), per-set Renderability report (missing plugins -0.12 ea cap 0.6, missing samples -0.04 ea cap 0.3, evicted -0.01 ea cap 0.1), `.icloud`-placeholder eviction detection (closes that backlog item), `materialize_icloud_samples` (brctl download + bounded poll); pending jobs scored at enqueue, picked easy-first (score DESC, unscored last); worker pre-flight downloads evicted samples (180s budget) before launching Live; worker previews stamped with FRESH post-download fidelity (only if imperfect); UI: score badge on pending jobs (good/ok/bad), ⚠ fidelity line on queue rows + player subtitle; CLI `triage <set>` for debugging.
+- [ ] M4a verify on host: cargo test -p indexer, `ableton-scan triage <old set>` sanity (check false-missing rate for Waves/shell plugins!), queue a few sets, confirm easy-first order + fidelity badges.
+- **GOTCHA (queue-button incident, 2026-06-12)**: enqueue commands originally awaited score_pending_jobs; first call runs `auval -a` which can take a long time -> UI looked broken (queue refreshed only when the promise finally resolved). Rule: enqueue-style commands return immediately + emit `export-queue-updated`; slow enrichment (scoring) runs in a detached spawn_blocking that emits again when done. Same pattern as the beach-ball rule: nothing user-facing ever awaits slow work.
+- **Inventory hardening (2026-06-12, user confirmed auval = the stall via [triage] logs)**: inventory now disk-cached (plugin_inventory.json next to library.db) fingerprinted by plugin-dir counts+mtimes -> auval cost paid only when plugin folders change; auval runs with 300s hard timeout + concurrent stdout reader (no pipe deadlock); failed/timed-out builds are never cached AND renderability ABSTAINS from plugin penalties when inventory < 10 names (a bogus inventory must not mass-report missing). AU Components dirs added to file-stem scan. score_pending_jobs is per-job error-tolerant (one bad set can't strand the rest).
+- **TWO-STAGE INVENTORY (2026-06-12, auval proved a black hole on user's machine — never even finished)**: app scores with a QUICK inventory (file stems) available in ms; FULL auval build runs detached once per session and on success: caches to disk, swaps in, clears pending scores, re-scores. Failed full build keeps quick + allows retry. Worker fidelity uses non-blocking snapshot. NOTHING waits on auval anywhere. Expected log flow: "quick inventory: N names" -> badges in seconds -> maybe later "full inventory ready -> re-scoring".
+- **AUVAL REMOVED ENTIRELY (2026-06-12, user decision: "doesn't seem worth it considering slowness")**: inventory = recursive bundle scan of /Library/Audio/Plug-Ins + ~/Library/... (whole roots per user suggestion) + vendor app dirs. ms-fast, built once per session (OnceLock), no cache file needed, no background upgrade machinery. Root cause of the wrong scores on user's 23 jobs: old build's auval timed out -> inventory was VST-stems-only -> every AU plugin (Soundtoys/KORG/Waves are all AU) read missing. Launch-time re-score heals existing wrong scores on next run.
+- **ROOT CAUSE FOUND via user's `triage --show-inventory` dump (2026-06-12)**: Soundtoys bundles use concatenated names (LittlePlate.bundle, SieQ.bundle) while .als spells them out ("Little Plate", "Sie-Q") — no exact/containment/token match across the space difference. FIX: space-squashed comparison in plugin_installed (+ regression tests with the real data). ALSO: re-triage/rescore now scrub stale verdicts everywhere — pending scores recomputed, finished-job fidelity cleared, worker previews RESTAMPED with current inventory (UI was quoting stamps from older buggy builds). Lesson: get the data dump BEFORE the third blind fix.
+- **False-missing fixes (2026-06-12, user: wrong "missing plugins"; uses Waves + Soundtoys + KORG + more)**: (1) bundle scan now RECURSIVE (walkdir depth 4) — vendors install in subfolders (/VST3/iZotope/...) and flat read_dir missed them; (2) CLAP dir + vendor app dirs added (Waves, Soundtoys, KORG, NI, iZotope, Plugin Alliance, Arturia, FabFilter, Eventide, UA — NOT all /Applications, too slow); (3) Apple stock AUs always treated installed (manufacturer=="Apple" or AUXxx name — they ship with macOS, no scannable bundle); (4) matching also tries "manufacturer name" combo; (5) ~~pending scores cleared on every launch~~ REMOVED 2026-06-12 once matching was fixed (user decision: scored stays scored; launch only scores never-scored jobs; Re-triage/rescore are the explicit refresh paths); (6) `triage <set> --show-inventory` lists known names to debug remaining false missings.
+- [x] M4b-lite: SAMPLE RELINK delivered the no-XML way (user idea 2026-06-12: "use Live's auto-search by name" -> better: the catalog IS the search index). Worker pre-flight 1: missing sample's basename looked up across ALL indexed sets' sample paths; live copy found -> symlink dead path -> live path (prefer newest mtime among candidates); Live then opens with nothing missing, no relocate scan. Pre-flight 2 (iCloud materialize) runs after so symlink targets are included. CLI `relink <set>` for manual/debug. CAVEATS: symlinks persist (deliberate — heals the project for Live too); generic basenames ("kick.wav") could link to a same-named different file (newest-wins heuristic; preview-grade fidelity).
+- [ ] M4b (rest): preview-PROXY sets — write a transformed COPY (never the original): bypass/remove missing effects (XML rewrite). Sample relink largely covered by symlink approach above.
 - [ ] M4c (experimental, user request "replace missing plugins, yes even synths, with closest built-in at medium effort"): instrument stand-ins so MIDI isn't silent. HONEST CONSTRAINT (told to user): third-party plugin state in .als = opaque vendor binary blob; parameter recovery is impossible in general. Closest achievable = category-guess stand-in from track/device names ("hear the notes, not the sound"); effects are better bypassed than badly approximated.
 - [x] **Bulk export / multi-select** (2026-06-11, user request): checkbox column + select-bar above results ("Select all" w/ indeterminate state, "Queue N renders", "Clear"); Finder-style row selection — cmd/ctrl-click toggles a row, shift-click extends range from last-clicked anchor (works on checkboxes AND rows; range action follows the clicked row's new state); selection auto-prunes to visible search results so hidden rows are never exported. Backend: `indexer::add_export_jobs_bulk` (single prepared stmt, re-queues pending/failed/completed but NEVER clobbers a `processing` job) + Tauri `add_to_export_queue_bulk(set_ids) -> queued count`. AWAITING HOST BUILD + TEST.
 - [x] **Bulk link rewrite** (2026-06-11, user: "Link Selected not fully working, maybe async"): old `link_watch_suggestions` Tauri command did N file moves + N SERIAL audio decodes directly on the async runtime (no spawn_blocking — the beach-ball gotcha again) with zero feedback. Now `ops::link_suggestions`: phase 1 moves files + resolves targets on the calling thread, phase 2 decodes in parallel (thread::scope) with sequential upserts; both Tauri link commands wrapped in spawn_blocking; bulk emits `link-progress (done,total)` events → button shows "Linking N/M…". Bulk link is a full background job like scan_folder/bulk_preview_scan (user request): shares ScanState cancel flag (Cancel button works), logs via scan-progress into the progress modal/banner ("linked …" lines count toward the previews stat), cancellable mid-decode, summary in scanMsg. Single-link surfaces the per-file error message.
@@ -252,6 +294,8 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
   - Frontend: verify component/function names align with the backend terminology once it's cleaned up.
 - [ ] Preview archive: keep historical previews per set, potentially anchored to Backup/ timestamps (stretch; pairs with --deep backup parsing)
 - [ ] Sample `evicted` state: detect iCloud `.icloud` placeholders vs truly missing files
+- [ ] Inventory endgame (if name-matching headaches recur): parse Ableton's own plugin database (Live's browser index = ground truth, no name matching). Reverse-engineering effort; only if the cheap matcher keeps biting.
+- [ ] Triage signal: parse `IsPlaceholderDevice` from .als (records plugin-was-missing at last save; stale but corroborating). Inventory is per-session (OnceLock) by design — new plugins seen on relaunch; revisit only if that bites.
 - [ ] `roots` table + `rescan` subcommand (refresh all previously scanned roots)
 - [ ] UI polish pass (user verdict on skeleton: "looks great, a little bland but functional")
 - [ ] Search: consider match-source indicator in results (why did this set match?) and column-scoped queries (e.g. plugin:soothe)
@@ -271,6 +315,7 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 .
 ./Cargo.toml
 ./tools
+./tools/__pycache__
 ./tools/reference_extract.py
 ./tools/export_set.py
 ./crates
@@ -304,6 +349,7 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 ./exports/py.json
 ./exports/leeroy veto.json
 ./exports/rust.json
+./package-lock.json
 ./ai
 ./ai/ai-context.sh
 ./ai/ARCHITECTURE.md
@@ -316,113 +362,113 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 
 ## 5. Recent Git Changes (Summary)
 ```text
-116121c fix: render queue never wedges on existing files (overnight-run hardening)
-9128911 feat: project-folder renders surface in the suggestions scan
-08bde30 fix: suggestions select-all never picks previewed projects
-669f476 fix: build error — rusqlite::params! in app crate (no rusqlite dep)
-3689a5f feat: reconsiderable links, case-insensitive paths, per-project preview scan
+9fe88bf Handoff snapshot v3: flag save-path contradiction as first verification, current code state, verified-vs-pending, ops module map in ARCHITECTURE
+058a15b Polish: dedupe AppleScript failure logs; README documents triage/rescore/relink/proxy + render queue behavior
+5807c1e Tech debt: fix all 4 cargo warnings (unused norm_stem field, mtime_secs fn, needless muts); real tiered-lookup test; untrack+ignore __pycache__; HUMAN.md current
+e1f79ae Context: save path correction (full path in name field != path; Go-To required)
+0b7fc47 Restore Go-To navigation: AX-set full path becomes a literal filename (default dir littered). Cmd+Shift+G to set dir + verified Go-To field, then filename-only in name box
 ```
 
 ## 6. Active Diff
 ```diff
 diff --git a/ai/CONTEXT_BUNDLE.md b/ai/CONTEXT_BUNDLE.md
-index 6e22634..2d25784 100644
+index 477bf70..324e43b 100644
 --- a/ai/CONTEXT_BUNDLE.md
 +++ b/ai/CONTEXT_BUNDLE.md
 @@ -1,5 +1,5 @@
  # AI Context Bundle
--Generated: Fri Jun 12 00:51:42 UTC 2026
-+Generated: Fri Jun 12 19:07:23 UTC 2026
+-Generated: Sat Jun 13 01:53:13 UTC 2026
++Generated: Sat Jun 13 01:54:48 UTC 2026
  
  ## ⚠️ Agent Navigation Guide
  1. Start with the **Current State** below to understand the focus.
-@@ -14,26 +14,26 @@ PURPOSE: This is the authoritative rulebook for AI assistants. It defines the 'h
+@@ -130,8 +130,9 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
+ ## 3. Project State (PROJECT_STATE.md)
+ # Project State
  
- ## Project Context
- - **Objective**: Build a local-first system to browse, search, organize, and preview Ableton projects without opening Ableton Live.
--- **Implementation Strategy**: Technology agnostic. Focus on portable, local-first solutions.
--- **Potential Stacks**:
--  - **Backend**: Node.js, Python (FastAPI), Go, or Rust.
--  - **Storage**: SQLite, DuckDB, or JSON/Flat-file.
--  - **Frontend**: React, Vue, or Desktop Native (Electron, Tauri).
-+- **Stack (decided 2026-06-11)**: Rust core + Tauri 2 desktop shell + React 18/TS frontend + SQLite (rusqlite + FTS5). CLI-first development: core logic validated via CLI before UI integration.
-+- **Working style**: User is NOT writing Rust — AI writes all code, user compiles/tests on their Mac and gives product feedback. The sandbox cannot run cargo; ALL Rust verification happens on the user's machine.
+-## ⚡ HANDOFF SNAPSHOT v3 (2026-06-13 end of session — read this first)
+-- **⚠ UNRESOLVED CONTRADICTION — verify FIRST**: the "SAVE PATH CORRECTION" entry below (from a parallel session) says AX-setting the FULL PATH into the save panel's name field does NOT resolve as a path (literal path-named files in the default folder). But the CURRENT code (tools/export_set.py as of 28e010d/058a15b) uses exactly that full-path approach, and the latest narrated logs show it reaching Replace+confirm. TO ADJUDICATE: run one render, then check (a) did the .wav land NEXT TO the .als in the project folder? (b) or did a file named like a whole path appear in the default save folder? If (b), implement the correction entry's design: Go-To panel for the DIRECTORY (AX-set its field, verify it opened), name field for FILENAME only.
++## ⚡ HANDOFF SNAPSHOT v3 (2026-06-13 — read this first)
++- **✅✅ GREEN RUNS CONFIRMED (2026-06-13, user: "its working super great right now!!!!")**: the export worker renders previews end-to-end. The dismissal fix (28e010d, text-field check instead of window-index existence) was the final unlock — renders had been succeeding while the script false-failed them. M4's core loop is FUNCTIONAL: triage -> proxy w/ relinked samples -> Live renders -> preview attached. The contradiction below is therefore resolved in favor of the CURRENT code (full-path AX set works on this macOS version); keep the entry for history.
++- **~~⚠ UNRESOLVED CONTRADICTION~~ (resolved above, kept for context)**: the "SAVE PATH CORRECTION" entry below (from a parallel session) says AX-setting the FULL PATH into the save panel's name field does NOT resolve as a path (literal path-named files in the default folder). But the CURRENT code (tools/export_set.py as of 28e010d/058a15b) uses exactly that full-path approach, and the latest narrated logs show it reaching Replace+confirm. TO ADJUDICATE: run one render, then check (a) did the .wav land NEXT TO the .als in the project folder? (b) or did a file named like a whole path appear in the default save folder? If (b), implement the correction entry's design: Go-To panel for the DIRECTORY (AX-set its field, verify it opened), name field for FILENAME only.
+ - **Current code state**: save flow = wait for panel (sheet OR dialog window, 60s) -> 2.5s settle -> AX-set full path in name field -> return -> Replace handled (incl. sheet-of-dialog-panel) -> dismissal = panel's TEXT FIELD gone (NOT window existence — progress dialog reoccupies the window index; this false-failed runs while renders were succeeding, the session's key breakthrough). All AppleScript narration now actually emits ([AS] lines via osascript `log`; do-shell-echo swallowed everything before).
+ - **Verified working in real logs**: proxy creation, folder-move + fuzzy sample relink, places indexing w/ budgets, export trigger, Replace click, cancellation, narration. **Not yet verified**: a clean green render end-to-end after the dismissal fix; "told u so"-class sets where the save panel never appears (likely Live still loading old sets — diagnose from [AS] narration).
+ - **Tech debt state**: cargo warnings all fixed (5807c1e); README current (058a15b); known accepted debt: duplicated mtime closures across crates, symlink relink kept as explicit CLI tool only.
+@@ -361,113 +362,12 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
  
- ## Architecture Constraints
- - **No Ableton SDK dependency**: User runs Live 11; the Extensions SDK (Live 12 Suite beta only) is off the table. Filesystem-first is the strategy, not a fallback.
- - **Version tolerance (backward + forward)**: Parser must handle .als files from older Live versions (9/10/11) and newer ones (12+). Extract leniently — skip unknown elements, never hard-fail on schema drift, record the Live version (Creator attribute) per set.
--- **API/Service Structure**: Modular service for metadata and preview management.
--- **Database/Persistence**: Local persistence for indexing and snapshots.
--- **Markdown Persistence**: All state must be tracked in `/ai`.
-+- **Crate layering**: `als-core` + `previews` → `indexer` (storage) → `ops` (workflows) → `cli` / `app` (frontends). Never import a frontend crate from a library crate.
-+- **Database/Persistence**: SQLite in app data dir (`~/Library/Application Support/ableton-library/library.db`). Catalog is always fully rebuildable from `.als` files. Never store DB inside user project folders.
-+- **Markdown Persistence**: All project state must be tracked in `/ai`.
- - **Local First**: Assume local filesystem and no cloud dependencies.
-+- **Incremental catalog**: Never assume the catalog is complete — user scans subfolders piecemeal. UI and queries treat the catalog as "what's been indexed so far".
+ ## 5. Recent Git Changes (Summary)
+ ```text
++9fe88bf Handoff snapshot v3: flag save-path contradiction as first verification, current code state, verified-vs-pending, ops module map in ARCHITECTURE
+ 058a15b Polish: dedupe AppleScript failure logs; README documents triage/rescore/relink/proxy + render queue behavior
+ 5807c1e Tech debt: fix all 4 cargo warnings (unused norm_stem field, mtime_secs fn, needless muts); real tiered-lookup test; untrack+ignore __pycache__; HUMAN.md current
+ e1f79ae Context: save path correction (full path in name field != path; Go-To required)
+ 0b7fc47 Restore Go-To navigation: AX-set full path becomes a literal filename (default dir littered). Cmd+Shift+G to set dir + verified Go-To field, then filename-only in name box
+-13cb4b0 Context: export breakthrough — false failures from progress-dialog window-index collision
+ ```
  
- ## Coding Conventions
- - **Explicit over Implicit**: Avoid hidden logic, reflection, or complex inheritance.
--- **Verification First**: All changes must be verified via tests and project-specific validation scripts.
-+- **Verification First**: All changes must be verified via tests and project-specific validation scripts. Keep `tools/reference_extract.py` in sync with any `als-core` parser change.
- - **Compact Context**: Keep context files task-scoped and minimal.
--- **Verify Before Building**: Never assume SDK capabilities; verify and document findings first.
--- **Catalog First**: Prioritize metadata cataloging over audio preview generation or AI features.
-+- **Async + spawn_blocking**: ALL Tauri commands must be `async`. Any command touching disk/db goes in `spawn_blocking`. (Learned from beach-ball incident — sync commands run on main thread.)
-+- **Multi-threading pattern**: CPU-bound batch work (`.als` parsing, audio peak extraction) uses `std::thread::scope` with worker threads funneling results to main thread for sequential SQLite writes.
-+- **Interleave scan + harvest**: When scanning a library, preview harvesting happens per-project immediately after that project's sets are ingested — never as a separate bulk pass. `known_samples` (sample cross-check) is built incrementally, not queried in bulk after commit.
-+- **Export worker**: Automated Live export uses macOS UI automation (`tools/export_set.py`). Serialize one render at a time; treat Live as flaky (timeouts, retry once, mark failed rather than wedging queue).
- 
- ## How to Navigate This Workspace (Priority Flow)
- To minimize token waste and maximize focus, follow this priority sequence:
-@@ -58,7 +58,7 @@ Ableton Library is a metadata and preview indexing system for Ableton projects,
- crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot; discovery  [BUILT, verified]
- crates/previews/   # lib: render discovery, name matching, symphonia peaks  [BUILT]
- crates/indexer/    # lib: SQLite (rusqlite + FTS5) storage; pure, no workflow logic  [BUILT, verified]
--crates/ops/        # lib: workflows (scan_library, hunt_renders, attach) shared by cli + app  [BUILT]
-+crates/ops/        # lib: workflows (scan_library, hunt_renders, attach) shared by cli + app; multi-threaded  [BUILT]
- crates/cli/        # bin: `ableton-scan` — thin wrappers over ops/indexer  [BUILT, verified]
- tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
- app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: symphonia for waveform peaks
-@@ -72,6 +72,7 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
- - **Version tolerance**: No Ableton SDK (user on Live 11; SDK is Live 12 Suite beta only). Parse leniently across Live versions, backward (9/10/11) and forward (12+): ignore unknown elements, tolerate missing ones, record Creator/version per set, and emit per-field extraction warnings instead of failing the whole file.
- - **Extracts**: Live version, tempo/time sig, tracks (type/name/color), clip names, device/plugin names, sample file references.
- - **Output**: Normalized ProjectSnapshot JSON per set.
-+- **Concurrency**: `scan_library` in the `ops` crate runs ONE worker pool (all CPU cores, `std::thread::scope`) consuming a **unified two-priority job deque** (`JobQueue`: `Mutex<VecDeque>` + `Condvar`) of two job kinds: `Parse` (.als decompression + XML parsing, pushed to the BACK) and `Decode` (preview audio decode + peak extraction, pushed to the FRONT). The main thread is the only SQLite writer (single-writer constraint) and the only job producer: it ingests parsed snapshots as they arrive and, when a project's last `.als` is ingested (per-project pending counter), runs the cheap name-matching (`plan_folder_harvest`) and pushes the resulting decode jobs to the front of the same queue. Two pitfalls this design fixes (both user-observed 2026-06-11): (1) inline `harvest_folder_renders` on the consumer thread blocked the parse channel and parked all parser threads whenever a project had previews; (2) a plain FIFO job channel queued decode jobs behind the entire remaining parse backlog, so previews only populated at the END of a scan — front-of-queue priority makes them appear live. Deadlock-safety invariants: job queue unbounded (producer == consumer, must never block), done channel bounded for backpressure, worker `pop` uses `wait_timeout` so parked workers notice cancellation, cancellation/queue-close drains the done channel so the main loop exits. `known_samples` (sample cross-check) is loaded from DB at scan start and grown incrementally from each ingested snapshot's sample paths.
- 
- ### 2. Metadata & Indexing Service — `indexer` (Rust + SQLite)
- - **Decision**: SQLite with FTS5 (over names) for search.
-@@ -83,9 +84,11 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
- - **Constraint**: Reimplementing Live's render engine is ruled out permanently. Live itself is the only correct renderer.
- - **Sources (priority)**:
-   - (a) **Discovery** (MVP): user-exported renders in/near project folder; Live 12 set previews in `Ableton Project Info/` (verify); frozen/processed audio fallback.
--  - (b) **Automated Live export** (flagship, post-catalog): worker launches a *second* Live install with the set, drives File -> Export via macOS UI automation (proven previously by owner). Constraints: serialize one render at a time; debounce save bursts; handle dialogs (missing samples, version prompts); UI scripting steals focus so make it opt-in/idle-scheduled; treat Live as flaky (timeouts, retry once, mark "render failed" rather than wedging queue). Isolated component — can start as a standalone script consuming jobs and emitting audio files.
-+  - (b) **Automated Live export** (flagship, post-catalog; queue infra BUILT): `export_jobs` table (schema v3) + worker loop in the Tauri backend (polls every 3s while "Auto-Export" is toggled on, one render at a time) + `tools/export_set.py` UI automation; finished renders are attached as previews (source=worker, confidence=1.0). Sets are queued from the UI per-row, from the detail pane, or in bulk via multi-select (checkboxes, cmd-click toggle, shift-click range; `add_to_export_queue_bulk`). Worker launches a *second* Live install with the set, drives File -> Export via macOS UI automation (proven previously by owner). Constraints: serialize one render at a time; debounce save bursts; handle dialogs (missing samples, version prompts); UI scripting steals focus so make it opt-in/idle-scheduled; treat Live as flaky (timeouts, retry once, mark "render failed" rather than wedging queue). Isolated component — can start as a standalone script consuming jobs and emitting audio files.
- - **Previews are per-SET, not per-project** (projects can hold multiple distinct .als, e.g. "wanna be your" + "wanna be your2"). Discovery must match found renders to sets by filename similarity (normalized prefix match vs set name); ambiguous matches attach at project level with low confidence. The export worker has no ambiguity (it knows which set it rendered).
-+  - (c) **FUTURE — headless/remote render via plugin substitution** (backlog, detailed in PROJECT_STATE.md): pre-render sanitize pass swaps third-party AU/VST/VST3 devices on a TEMP COPY of the .als for built-in Suite equivalents with translated parameters, so the set opens clean in a Live install on a VM/spare/remote machine with zero 3rd-party plugins — rendering without touching the user's active computer. Originals never modified; previews labeled approximate with a substitution log. Live remains the renderer (constraint above unchanged). Requires a .als WRITER (today we only read), substitution/param-mapping tables, and a remote worker speaking the export_jobs queue.
- - **Waveforms**: Decode (symphonia), precompute peaks once, cache keyed by set hash.
-+- **Concurrency**: `hunt_renders` (bulk scan) and standalone `harvest_folder_renders` (the app's per-folder rescan) parallelize audio decoding + peak extraction via `std::thread::scope`. Inside `scan_library`, harvesting is split: `plan_folder_harvest` (cheap matching + DB filter, main thread) emits `DecodeJob`s into the scanner's unified worker pool.
- 
- ### 4. User Interface — Tauri 2 [skeleton BUILT 2026-06-11]
- - **Decision**: Tauri 2 shell, React/TS frontend; core logic lives in the Tauri Rust backend (no sidecar). Audio streamed to webview via asset protocol (when previews land).
-@@ -93,7 +96,25 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
- - **Views**: Library View (Search/Filters) ✓, Set Detail pane ✓; Player pending Milestone 3.
- 
- ## Data Flow
--Filesystem (.als) -> als-core (streaming parse) -> indexer (SQLite) -> Tauri commands -> React UI
-+```
-+Filesystem (.als + renders) -> unified worker pool (Parse | Decode jobs, all cores)
-+                            -> main thread (SQLite writes + plan_folder_harvest matching)
-+                            -> Tauri commands -> React UI
-+```
-+Key design: scan + harvest are interleaved per-project AND share one worker pool — a project's decode jobs are queued the moment its last `.als` is ingested, but indexing of later projects continues in parallel. Logs interleave (`indexed -> preview -> indexed`) without lockstep stalls.
-+
-+## Known Naming Inconsistencies (backlog)
-+The codebase has grown organically and several naming choices are vague or inconsistent. These should be addressed in a dedicated rename pass:
-+
-+| Current Name | Problem | Suggested Direction |
-+|---|---|---|
-+| `hunt_renders` / `harvest_folder_renders` | Two different verbs ("hunt" / "harvest") for the same concept | Unify: e.g. `scan_previews` / `scan_folder_previews` |
-+| `RenderFile` / "preview" / "render" | Three terms for one thing (an audio file linked to a set) | Pick one term project-wide |
-+| `ops` crate | Too generic | Consider `workflows` or `commands` |
-+| `set_match_candidates` | Ambiguous — returns sets? candidates? | `preview_match_candidates` |
+ ## 6. Active Diff
+ ```diff
+-diff --git a/ai/ARCHITECTURE.md b/ai/ARCHITECTURE.md
+-index 53b4080..4c49d4d 100644
+---- a/ai/ARCHITECTURE.md
+-+++ b/ai/ARCHITECTURE.md
+-@@ -13,7 +13,12 @@ Ableton Library is a metadata and preview indexing system for Ableton projects,
+- crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot; discovery  [BUILT, verified]
+- crates/previews/   # lib: render discovery, name matching, symphonia peaks  [BUILT]
+- crates/indexer/    # lib: SQLite (rusqlite + FTS5) storage; pure, no workflow logic  [BUILT, verified]
+--crates/ops/        # lib: workflows (scan_library, hunt_renders, attach) shared by cli + app; multi-threaded  [BUILT]
+-+crates/ops/        # lib: workflows shared by cli + app; multi-threaded  [BUILT]
+-+                   #   lib.rs: scan_library, hunt_renders, attach
+-+                   #   triage.rs: plugin inventory, renderability scoring, iCloud materialize, symlink relink (CLI-only)
+-+                   #   sample_index.rs: budgeted recursive audio index, tiered fuzzy lookup
+-+                   #   places.rs: Ableton Library.cfg "Places" parsing
+-+                   #   proxy.rs: relink planning + proxy .als writer (worker render path)
+- crates/cli/        # bin: `ableton-scan` — thin wrappers over ops/indexer  [BUILT, verified]
+- tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
+- app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: symphonia for waveform peaks
+-diff --git a/ai/CONTEXT_BUNDLE.md b/ai/CONTEXT_BUNDLE.md
+-index 835b347..672fa31 100644
+---- a/ai/CONTEXT_BUNDLE.md
+-+++ b/ai/CONTEXT_BUNDLE.md
+-@@ -1,5 +1,5 @@
+- # AI Context Bundle
+--Generated: Sat Jun 13 01:50:12 UTC 2026
+-+Generated: Sat Jun 13 01:53:13 UTC 2026
+- 
+- ## ⚠️ Agent Navigation Guide
+- 1. Start with the **Current State** below to understand the focus.
+-@@ -58,7 +58,12 @@ Ableton Library is a metadata and preview indexing system for Ableton projects,
+- crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot; discovery  [BUILT, verified]
+- crates/previews/   # lib: render discovery, name matching, symphonia peaks  [BUILT]
+- crates/indexer/    # lib: SQLite (rusqlite + FTS5) storage; pure, no workflow logic  [BUILT, verified]
+--crates/ops/        # lib: workflows (scan_library, hunt_renders, attach) shared by cli + app; multi-threaded  [BUILT]
+-+crates/ops/        # lib: workflows shared by cli + app; multi-threaded  [BUILT]
+-+                   #   lib.rs: scan_library, hunt_renders, attach
+-+                   #   triage.rs: plugin inventory, renderability scoring, iCloud materialize, symlink relink (CLI-only)
+-+                   #   sample_index.rs: budgeted recursive audio index, tiered fuzzy lookup
+-+                   #   places.rs: Ableton Library.cfg "Places" parsing
+-+                   #   proxy.rs: relink planning + proxy .als writer (worker render path)
+- crates/cli/        # bin: `ableton-scan` — thin wrappers over ops/indexer  [BUILT, verified]
+- tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
+- app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: symphonia for waveform peaks
+-@@ -125,7 +130,14 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
+- ## 3. Project State (PROJECT_STATE.md)
+- # Project State
+- 
+--## ⚡ HANDOFF SNAPSHOT v2 (2026-06-12 — read this first)
+-+## ⚡ HANDOFF SNAPSHOT v3 (2026-06-13 end of session — read this first)
+-+- **⚠ UNRESOLVED CONTRADICTION — verify FIRST**: the "SAVE PATH CORRECTION" entry below (from a parallel session) says AX-setting the FULL PATH into the save panel's name field does NOT resolve as a path (literal path-named files in the default folder). But the CURRENT code (tools/export_set.py as of 28e010d/058a15b) uses exactly that full-path approach, and the latest narrated logs show it reaching Replace+confirm. TO ADJUDICATE: run one render, then check (a) did the .wav land NEXT TO the .als in the project folder? (b) or did a file named like a whole path appear in the default save folder? If (b), implement the correction entry's design: Go-To panel for the DIRECTORY (AX-set its field, verify it opened), name field for FILENAME only.
+-+- **Current code state**: save flow = wait for panel (sheet OR dialog window, 60s) -> 2.5s settle -> AX-set full path in name field -> return -> Replace handled (incl. sheet-of-dialog-panel) -> dismissal = panel's TEXT FIELD gone (NOT window existence — progress dialog reoccupies the window index; this false-failed runs while renders were succeeding, the session's key breakthrough). All AppleScript narration now actually emits ([AS] lines via osascript `log`; do-shell-echo swallowed everything before).
+-+- **Verified working in real logs**: proxy creation, folder-move + fuzzy sample relink, places indexing w/ budgets, export trigger, Replace click, cancellation, narration. **Not yet verified**: a clean green render end-to-end after the dismissal fix; "told u so"-class sets where the save panel never appears (likely Live still loading old sets — diagnose from [AS] narration).
+-+- **Tech debt state**: cargo warnings all fixed (5807c1e); README current (058a15b); known accepted debt: duplicated mtime closures across crates, symlink relink kept as explicit CLI tool only.
+-+- **Working agreements unchanged**: user gives product feedback, agent writes all code, user's Mac is the only build/test host; budget + narrate ALL unbounded work; get log dumps BEFORE fixes; update /ai + commit every step.
+-+
+-+## HANDOFF SNAPSHOT v2 (2026-06-12 — older session log below)
+- - **✅ RELINK REDESIGN (Completed 2026-06-12)**: Relinking now uses **Proxy Sets** (ephemeral `.als` copies in the app cache with absolute path rewriting). Original projects are untouched. No symlinks used for auto-export.
+- - **✅ ABLETON PLACES (Completed 2026-06-12)**: `Library.cfg` is parsed to find user-pinned folders, used as priority search roots for missing samples (especially project-local moves).
+- - **✅ EXPORT WORKER VISIBILITY (Completed 2026-06-12)**: Addressed "stall" perception by injecting real-time logs from the pre-flight sample relinker into the UI logs. Confirmed the worker was active, not stalled, during relinking/iCloud materialization.
+-@@ -349,113 +361,12 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
+- 
+- ## 5. Recent Git Changes (Summary)
+- ```text
 ```

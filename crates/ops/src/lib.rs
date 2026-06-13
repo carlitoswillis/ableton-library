@@ -4,6 +4,12 @@
 //! run the same scans. Layering: als-core (parse) + previews (renders/peaks)
 //! -> indexer (storage) -> ops (workflows) -> cli / app (frontends).
 
+pub mod artist;
+pub mod triage;
+pub mod places;
+pub mod proxy;
+pub mod sample_index;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -133,11 +139,28 @@ pub struct ScanSummary {
 }
 
 /// Index a library root (incremental), then harvest in-folder renders.
+/// Re-derive the artist for every already-indexed project straight from its
+/// stored path — no filesystem walk, no `.als` re-parse. Backfills catalogs
+/// that were indexed before artist support (or before the path-marker fix).
+/// Only projects whose path yields an artist are touched (year-filed projects
+/// stay untouched). Returns how many projects were tagged.
+pub fn reindex_artists(conn: &Connection) -> Result<usize> {
+    let mut tagged = 0usize;
+    for (id, path) in indexer::all_projects(conn)? {
+        if let Some(a) = artist::artist_from_full_path(Path::new(&path)) {
+            indexer::set_project_artist(conn, id, &a)?;
+            tagged += 1;
+        }
+    }
+    Ok(tagged)
+}
+
 pub fn scan_library(
     conn: &Connection,
     root: &Path,
     force: bool,
     harvest: bool,
+    artist_override: Option<&str>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     log: Log,
 ) -> Result<ScanSummary> {
@@ -175,7 +198,11 @@ pub fn scan_library(
             }
         }
         let folder = std::path::absolute(&proj.dir)?.to_string_lossy().into_owned();
-        let pid = indexer::upsert_project(conn, &folder, &proj.name, &now)?;
+        // Explicit override wins; otherwise infer from the path between the
+        // scan root and the project folder. `None` => leave artist as-is.
+        let inferred = artist::infer_artist(&root_abs, &proj.dir);
+        let artist = artist_override.or(inferred.as_deref());
+        let pid = indexer::upsert_project(conn, &folder, &proj.name, artist, &now)?;
         indexer::replace_backups(conn, pid, &proj.backups)?;
         
         if harvest {
@@ -377,6 +404,7 @@ fn build_preview_row(
         size: meta.len(),
         duration: Some(pk.duration_secs),
         peaks_json: Some(previews::peaks::to_json(&pk.peaks)),
+        fidelity_json: None, // discovered/manual renders are real bounces — full fidelity
     })
 }
 
@@ -664,7 +692,7 @@ pub fn hunt_renders(
     // Second pass: filter winners against DB state
     let mut tasks = Vec::new();
     for (key, win) in winners {
-        let (set_id, project_id) = key;
+        let (set_id, _project_id) = key;
         let abs = std::path::absolute(&win.render.path)?.to_string_lossy().into_owned();
         
         // Skip if this exact file is already the preview

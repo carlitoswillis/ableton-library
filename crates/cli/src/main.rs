@@ -44,6 +44,10 @@ enum Cmd {
         /// Skip the in-folder render harvest (e.g. to avoid iCloud downloads).
         #[arg(long)]
         no_previews: bool,
+        /// Tag every project under ROOT with this artist, overriding the
+        /// path-based guess. Use when scanning an artist's folder directly.
+        #[arg(long)]
+        artist: Option<String>,
     },
     /// Search the catalog. TEXT uses FTS5 over project/set/track/device/sample names.
     Search {
@@ -55,6 +59,33 @@ enum Cmd {
         /// Substring match on device/plugin name.
         #[arg(long)]
         plugin: Option<String>,
+        /// Substring match on the project's (path-derived) artist.
+        #[arg(long)]
+        artist: Option<String>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// List every derived artist and how many projects each has.
+    Artists {
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Backfill artists for already-indexed projects from their stored paths
+    /// (no scanning, no re-parsing). Use after upgrading or the path fix.
+    ReindexArtists {
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Manually set a set's artist (override). Pass an empty string to clear.
+    /// With --project, sets the whole project's artist instead of one set.
+    SetArtist {
+        /// Set id, exact path, or path fragment.
+        set: String,
+        /// Artist name ("" clears).
+        artist: String,
+        /// Apply to the whole project (all its sets) instead of just this set.
+        #[arg(long)]
+        project: bool,
         #[arg(long)]
         db: Option<PathBuf>,
     },
@@ -92,12 +123,47 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Renderability report for a set: missing plugins, missing/evicted
+    /// samples, and the 0..1 score the export worker uses for easy-first
+    /// ordering. (Builds the installed-plugin inventory; first run is slow.)
+    Triage {
+        /// Set id, exact path, or path fragment.
+        set: String,
+        /// Also print every known installed-plugin name (for debugging
+        /// false "missing plugin" reports).
+        #[arg(long)]
+        show_inventory: bool,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Relink a set's missing samples: symlink dead paths to live copies
+    /// found via the catalog (same filename referenced by any indexed set).
+    Relink {
+        /// Set id, exact path, or path fragment.
+        set: String,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Clear and recompute triage scores for all pending export jobs
+    /// (fresh plugin inventory). Use after installing plugins or upgrading.
+    Rescore {
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
     /// Manually attach an audio file to a set (confidence 1.0).
     Attach {
         /// Set id, exact path, or path fragment.
         set: String,
         /// Audio file to attach.
         audio: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Create a transformed copy of a set with missing samples relinked in
+    /// the app cache dir. (M4b relinking redesign).
+    Proxy {
+        /// Set id, exact path, or path fragment.
+        set: String,
         #[arg(long)]
         db: Option<PathBuf>,
     },
@@ -114,18 +180,36 @@ fn db_path(opt: Option<PathBuf>) -> Result<PathBuf> {
 fn main() -> Result<()> {
     match Args::parse().cmd {
         Cmd::Json { root, pretty } => cmd_json(&root, pretty),
-        Cmd::Scan { root, db, force, no_previews } => cmd_scan(&root, db, force, no_previews),
-        Cmd::Search { text, min_bpm, max_bpm, plugin, db } => {
-            cmd_search(text, min_bpm, max_bpm, plugin, db)
+        Cmd::Scan { root, db, force, no_previews, artist } => {
+            cmd_scan(&root, db, force, no_previews, artist)
         }
+        Cmd::Search { text, min_bpm, max_bpm, plugin, artist, db } => {
+            cmd_search(text, min_bpm, max_bpm, plugin, artist, db)
+        }
+        Cmd::Artists { db } => cmd_artists(db),
+        Cmd::ReindexArtists { db } => cmd_reindex_artists(db),
+        Cmd::SetArtist { set, artist, project, db } => cmd_set_artist(&set, &artist, project, db),
         Cmd::Inspect { set, db } => cmd_inspect(&set, db),
         Cmd::Stats { db } => cmd_stats(db),
         Cmd::Previews { roots, threshold, verbose, db } => {
             cmd_previews(&roots, threshold, verbose, db)
         }
+        Cmd::Triage { set, show_inventory, db } => cmd_triage(&set, show_inventory, db),
+        Cmd::Rescore { db } => cmd_rescore(db),
+        Cmd::Relink { set, db } => cmd_relink(&set, db),
         Cmd::Attach { set, audio, db } => cmd_attach(&set, &audio, db),
+        Cmd::Proxy { set, db } => cmd_proxy(&set, db),
         Cmd::Reset { yes, db } => cmd_reset(yes, db),
     }
+}
+
+fn cmd_proxy(set: &str, db: Option<PathBuf>) -> Result<()> {
+    let conn = indexer::open(&db_path(db)?)?;
+    let set_id = indexer::resolve_set(&conn, set)?;
+    let mut log = |line: String| eprintln!("  {line}");
+    let path = ops::proxy::create_proxy_set(&conn, set_id, &mut log)?;
+    eprintln!("proxy set created: {}", path.display());
+    Ok(())
 }
 
 fn cmd_reset(yes: bool, db: Option<PathBuf>) -> Result<()> {
@@ -177,6 +261,49 @@ fn cmd_previews(
     Ok(())
 }
 
+fn cmd_triage(set: &str, show_inventory: bool, db: Option<PathBuf>) -> Result<()> {
+    let db = db_path(db)?;
+    let conn = indexer::open(&db)?;
+    let set_id = indexer::resolve_set(&conn, set)?;
+    // Quick inventory: same source the app uses for instant scoring, so this
+    // command reproduces exactly what the badges claim.
+    let installed = ops::triage::installed_plugins_quick();
+    eprintln!("{} installed plugin names known (quick inventory)", installed.names.len());
+    if show_inventory {
+        let mut names = installed.names.clone();
+        names.sort();
+        for n in &names {
+            println!("{n}");
+        }
+        println!("---");
+    }
+    let r = ops::triage::renderability(&conn, set_id, &installed)?;
+    println!("{}", serde_json::to_string_pretty(&r)?);
+    Ok(())
+}
+
+fn cmd_rescore(db: Option<PathBuf>) -> Result<()> {
+    let conn = indexer::open(&db_path(db)?)?;
+    indexer::clear_pending_job_scores(&conn)?;
+    indexer::clear_finished_job_fidelity(&conn)?;
+    let installed = ops::triage::installed_plugins();
+    eprintln!("{} installed plugin names (folder scan)", installed.names.len());
+    let mut log = |line: String| eprintln!("  {line}");
+    let n = ops::triage::score_pending_jobs(&conn, &installed, &mut log)?;
+    let m = ops::triage::restamp_worker_previews(&conn, &installed, &mut log)?;
+    eprintln!("re-scored {n} pending job(s); restamped {m} worker preview set(s)");
+    Ok(())
+}
+
+fn cmd_relink(set: &str, db: Option<PathBuf>) -> Result<()> {
+    let conn = indexer::open(&db_path(db)?)?;
+    let set_id = indexer::resolve_set(&conn, set)?;
+    let mut log = |line: String| eprintln!("  {line}");
+    let (linked, unresolved) = ops::triage::relink_missing_samples(&conn, set_id, &mut log)?;
+    eprintln!("relink done: {linked} linked, {unresolved} unresolved");
+    Ok(())
+}
+
 fn cmd_attach(set: &str, audio: &Path, db: Option<PathBuf>) -> Result<()> {
     let conn = indexer::open(&db_path(db)?)?;
     let set_id = indexer::resolve_set(&conn, set)?;
@@ -215,11 +342,17 @@ fn cmd_json(root: &Path, pretty: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_scan(root: &Path, db: Option<PathBuf>, force: bool, no_previews: bool) -> Result<()> {
+fn cmd_scan(
+    root: &Path,
+    db: Option<PathBuf>,
+    force: bool,
+    no_previews: bool,
+    artist: Option<String>,
+) -> Result<()> {
     let db = db_path(db)?;
     let conn = indexer::open(&db)?;
     let mut log = |line: String| eprintln!("  {line}");
-    let s = ops::scan_library(&conn, root, force, !no_previews, None, &mut log)?;
+    let s = ops::scan_library(&conn, root, force, !no_previews, artist.as_deref(), None, &mut log)?;
     let st = indexer::stats(&conn)?;
     eprintln!(
         "scan done: {} indexed, {} unchanged, {} errors, {} pruned, {} preview(s) harvested",
@@ -238,6 +371,7 @@ fn cmd_search(
     min_bpm: Option<f64>,
     max_bpm: Option<f64>,
     plugin: Option<String>,
+    artist: Option<String>,
     db: Option<PathBuf>,
 ) -> Result<()> {
     let conn = indexer::open(&db_path(db)?)?;
@@ -248,6 +382,8 @@ fn cmd_search(
             min_bpm,
             max_bpm,
             plugin,
+            artist,
+            list_id: None,
             sort_by: None,
             date_modified: None,
             date_scanned: None,
@@ -260,8 +396,9 @@ fn cmd_search(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         println!(
-            "[{:>5}] {:35.35} {:35.35} {:>6} bpm  {:>4}  {}",
+            "[{:>5}] {:18.18} {:28.28} {:28.28} {:>6} bpm  {:>4}  {}",
             h.set_id,
+            h.artist.clone().unwrap_or_default(),
             h.project,
             file,
             h.tempo.map(|t| format!("{t}")).unwrap_or_else(|| "?".into()),
@@ -270,6 +407,42 @@ fn cmd_search(
         );
     }
     eprintln!("{} result(s)", hits.len());
+    Ok(())
+}
+
+fn cmd_set_artist(set: &str, artist: &str, project: bool, db: Option<PathBuf>) -> Result<()> {
+    let conn = indexer::open(&db_path(db)?)?;
+    let set_id = indexer::resolve_set(&conn, set)?;
+    let value = if artist.trim().is_empty() { None } else { Some(artist.trim()) };
+    if project {
+        let pid = indexer::set_project_id(&conn, set_id)?;
+        indexer::set_project_artist_opt(&conn, pid, value)?;
+        eprintln!("project artist {} for set {set_id}", value.map(|v| format!("set to '{v}'")).unwrap_or_else(|| "cleared".into()));
+    } else {
+        indexer::set_set_artist_override(&conn, set_id, value)?;
+        eprintln!("set artist {} for set {set_id}", value.map(|v| format!("set to '{v}'")).unwrap_or_else(|| "cleared".into()));
+    }
+    Ok(())
+}
+
+fn cmd_reindex_artists(db: Option<PathBuf>) -> Result<()> {
+    let conn = indexer::open(&db_path(db)?)?;
+    let n = ops::reindex_artists(&conn)?;
+    eprintln!("reindexed artists from stored paths: {n} project(s) tagged");
+    Ok(())
+}
+
+fn cmd_artists(db: Option<PathBuf>) -> Result<()> {
+    let conn = indexer::open(&db_path(db)?)?;
+    let artists = indexer::list_artists(&conn)?;
+    for (name, count) in &artists {
+        println!(
+            "{:>4}  {}",
+            count,
+            name.clone().unwrap_or_else(|| "(unknown)".into())
+        );
+    }
+    eprintln!("{} artist(s)", artists.len());
     Ok(())
 }
 
