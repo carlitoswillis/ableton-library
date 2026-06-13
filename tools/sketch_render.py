@@ -429,7 +429,7 @@ def synth_note(freq, dur_sec, vel, kind, sr):
         sig = (np.sin(2 * np.pi * freq * t)
                + 0.35 * np.sin(2 * np.pi * 2 * freq * t)
                + 0.18 * np.sin(2 * np.pi * 3 * freq * t)) / 1.53 * env
-    return (sig * amp * 0.32).astype(np.float32)
+    return declick((sig * amp * 0.32).astype(np.float32), sr)
 
 
 def midi_note_positions(clip):
@@ -458,6 +458,25 @@ def midi_note_positions(clip):
             if cs <= ab < ce:
                 out.append((ab, d, pitch, vel))
     return out
+
+
+def declick(buf, sr, fi_ms=1.5, fo_ms=5.0):
+    """Tiny raised-cosine fade on the first/last few ms of a buffer so voices
+    don't start/end on a non-zero sample (the source of the constant clicks).
+    Attack stays short (≈1.5 ms) to keep drum transients punchy; release a bit
+    longer. Edits in place and returns the buffer."""
+    n = buf.shape[0]
+    if n < 8:
+        return buf
+    fi = min(int(sr * fi_ms / 1000.0), n // 2)
+    fo = min(int(sr * fo_ms / 1000.0), n // 2)
+    if fi > 1:
+        r = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, fi))).astype(np.float32)
+        buf[:fi] *= r[:, None] if buf.ndim == 2 else r
+    if fo > 1:
+        r = 0.5 * (1.0 - np.cos(np.linspace(np.pi, 0.0, fo))).astype(np.float32)
+        buf[-fo:] *= r[:, None] if buf.ndim == 2 else r
+    return buf
 
 
 def pitch_resample(audio, semitones):
@@ -503,7 +522,8 @@ def instrument_voice(part, pitch, project_dir, index, base_cache, pitch_cache):
     if key in pitch_cache:
         return pitch_cache[key]
     base = instrument_base(part, project_dir, index, base_cache)
-    v = None if base is None else pitch_resample(base, semi)
+    # declick the (cached) voice once so every retrigger has clean edges
+    v = None if base is None else declick(pitch_resample(base, semi).copy(), OUT_SR)
     pitch_cache[key] = v
     return v
 
@@ -611,6 +631,7 @@ def render(als_path, out_path, target_sr=OUT_SR, max_seconds=60.0,
             n = min(fi, seg.shape[0]); seg[:n] *= np.linspace(0, 1, n)[:, None]
         if fo > 1:
             n = min(fo, seg.shape[0]); seg[-n:] *= np.linspace(1, 0, n)[:, None]
+        seg = declick(seg.copy(), target_sr)  # kill edge clicks (incl. overlap cut)
 
         at = int(start_sec * target_sr)
         end = at + seg.shape[0]
