@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use previews::sketch::parser::parse_sketch_data;
 use previews::sketch::engine::{render_sketch, write_wav_file};
-use rusqlite::Connection;
 use indexer;
+use crate::sample_index::build_search_index;
 
 /// Parse and render a sketch preview for a set file.
 pub fn render_sketch_file(
@@ -14,6 +14,7 @@ pub fn render_sketch_file(
     als_path: &Path,
     out_path: &Path,
     max_seconds: f64,
+    lib_root: Option<&Path>,
     log: &mut dyn FnMut(String),
 ) -> Result<(), String> {
     log(format!("Parsing set {}…", als_path.display()));
@@ -23,18 +24,45 @@ pub fn render_sketch_file(
     
     let project_dir = als_path.parent().ok_or_else(|| "No parent directory for set".to_string())?;
     
-    // Closure for sample resolution using indexer
+    // Build SampleIndex for this run (Places + project/lib root)
+    let mut extra_roots = Vec::new();
+    if let Some(r) = lib_root {
+        extra_roots.push(r.to_path_buf());
+    }
+    let sample_idx = build_search_index(&extra_roots, log);
+
+    // Closure for sample resolution
     let conn = Arc::new(Mutex::new(conn));
     let resolve_sample = |path_abs: &Option<String>, rel_path: &Option<String>| -> Option<PathBuf> {
-        // ... (existing resolution logic)
+        // 1. Absolute path check
+        if let Some(ref p) = path_abs {
+            let pb = PathBuf::from(p);
+            if pb.exists() {
+                return Some(pb);
+            }
+        }
 
-        // 3. Basename lookup in database index
+        // 2. Project-relative check
+        if let Some(ref r) = rel_path {
+            let pb = project_dir.join(r);
+            if pb.exists() {
+                return Some(pb);
+            }
+        }
+
+        // 3. SampleIndex lookup (Places + extra roots)
         let filename = rel_path.as_ref()
             .and_then(|r| Path::new(r).file_name())
             .or_else(|| path_abs.as_ref().and_then(|p| Path::new(p).file_name()))
             .map(|n| n.to_string_lossy().into_owned());
 
         if let Some(ref fname) = filename {
+            let hits = sample_idx.find(fname);
+            if let Some(h) = hits.first() {
+                return Some(h.clone());
+            }
+
+            // 4. Catalog-wide basename lookup (where else is this file used?)
             let conn = conn.lock().unwrap();
             if let Ok(hits) = indexer::sample_paths_by_basename(&conn, fname) {
                 for h in hits {

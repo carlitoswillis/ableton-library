@@ -238,26 +238,26 @@ fn cmd_sketch(
     library_root: Option<PathBuf>,
     db: Option<PathBuf>,
 ) -> Result<()> {
+    let db_path = db_path(db)?;
     let set_path = if Path::new(set).exists() {
         PathBuf::from(set)
     } else {
-        let conn = indexer::open(&db_path(db)?)?;
+        let conn = indexer::open(&db_path)?;
         let set_id = indexer::resolve_set(&conn, set)?;
         let p_str = indexer::set_path(&conn, set_id)?;
         PathBuf::from(p_str)
     };
 
     let mut log = |line: String| eprintln!("  {line}");
-    let places = ops::places::get_ableton_places();
     let parent = set_path.parent().map(|p| p.to_path_buf());
     let lib_root = library_root.as_deref().or(parent.as_deref());
 
     ops::sketch::render_sketch_file(
+        &db_path,
         &set_path,
         out,
         max_seconds,
         lib_root,
-        &places,
         &mut log,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;

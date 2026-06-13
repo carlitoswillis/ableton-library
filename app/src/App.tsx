@@ -204,7 +204,6 @@ export default function App() {
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [selectedSuggestions, setSelectedSuggestions] = useState<string[]>([]);
   const [linkProgress, setLinkProgress] = useState<[number, number] | null>(null);
-  const [sketchPrevs, setSketchPrevs] = useState<Record<number, PreviewInfo>>({});
 
   const runSearch = useCallback(async () => {
     try {
