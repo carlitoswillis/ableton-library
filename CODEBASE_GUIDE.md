@@ -417,9 +417,11 @@ app/src/PlayerBar.tsx            waveform player
 app/src/styles.css               dark theme
 tools/reference_extract.py       THE ORACLE — parser spec/test
 tools/export_set.py              macOS UI automation: drive Live's File->Export
+tools/sketch_render.py           approximate "sketch" preview PROTOTYPE (no Ableton; see handoff)
 ai/PROJECT_STATE.md              running log + handoff snapshots (read first)
 ai/AGENTS.md                     rules for contributors (human + AI)
 ai/ARCHITECTURE.md               high-level decisions & data flow
+ai/SKETCH_RENDER_HANDOFF.md      sketch renderer: .als spec, algorithm, Rust-port + UI plan
 CODEBASE_GUIDE.md                this file (repo root)
 ```
 

@@ -108,6 +108,10 @@ The app reads `~/Library/Application Support/ableton-library/library.db` — ind
 
 **Render queue (Auto-Export)**: the app can render previews for sets that have none by driving a real Ableton Live install via UI automation (`tools/export_set.py`). Live opens and runs **in the foreground** — don't touch mouse/keyboard during a render. Sets are triaged first (missing plugins/samples = lower score, easy sets render first), missing samples are relinked into a temporary proxy copy of the set (your `.als` is never modified), and finished renders attach as previews with an honest "what was missing" fidelity note.
 
+> Note: Auto-Export needs macOS **Accessibility** permission for the app that *launches* it (your terminal when running `tauri dev`, or the built `.app`) — System Settings → Privacy & Security → Accessibility. The grant attaches to the launcher, not the binary, so granting your terminal once survives rebuilds.
+
+**Approximate "sketch" preview (no Ableton)**: a fast, deliberately-approximate fallback for sets with no real bounce — it reads the arrangement audio clips and MIDI (notes trigger each track's real Simpler/Sampler sample, repitched; a generic synth fills in for true synths), honoring mute and your mix levels. Python prototype: `tools/sketch_render.py` (`python3 tools/sketch_render.py <set.als> -o out.wav`). It's a stopgap, never a stand-in for a real render. Rust port + UI wiring are speced in **`ai/SKETCH_RENDER_HANDOFF.md`**.
+
 ## Repository layout
 
 ```
@@ -116,6 +120,8 @@ crates/indexer/             # SQLite + FTS5 catalog (shared by CLI and app)
 crates/cli/                 # the ableton-scan binary
 app/                        # Tauri 2 + React desktop app (src-tauri/ = Rust side)
 tools/reference_extract.py  # executable spec / test oracle for als-core
+tools/export_set.py         # Auto-Export UI automation (drives real Ableton Live)
+tools/sketch_render.py      # approximate "sketch" preview prototype (no Ableton)
 ai/                         # project state, architecture, agent rules (start here)
 example-project-library/    # local test fixtures (gitignored)
 ```
