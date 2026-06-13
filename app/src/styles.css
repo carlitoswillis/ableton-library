@@ -77,8 +77,10 @@ header h1 {
 
 .filters {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 6px 18px 12px;
+  max-width: 100%;
 }
 
 .filters input {

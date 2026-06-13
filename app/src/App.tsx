@@ -144,6 +144,10 @@ export default function App() {
   const [menuPos, setMenuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [menuMemberships, setMenuMemberships] = useState<Set<number>>(new Set());
   const [newListName, setNewListName] = useState("");
+  const [showListsModal, setShowListsModal] = useState(false);
+  const [listDrafts, setListDrafts] = useState<Record<number, string>>({}); // id -> edited name
+  const [confirmDeleteList, setConfirmDeleteList] = useState<number | null>(null);
+  const [modalNewList, setModalNewList] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -151,7 +155,6 @@ export default function App() {
   const [track, setTrack] = useState<PlayerTrack | null>(null);
   const [sortBy, setSortBy] = useState("modified");
   const [dateModified, setDateModified] = useState("");
-  const [dateScanned, setDateScanned] = useState("");
   const [hasPreviewFilter, setHasPreviewFilter] = useState("all");
   const [scanning, setScanning] = useState(false);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
@@ -189,14 +192,14 @@ export default function App() {
         list_id: listFilter ? parseInt(listFilter) : null,
         sort_by: sortBy || null,
         date_modified: dateModified || null,
-        date_scanned: dateScanned || null,
+        date_scanned: null,
         has_preview: hasPreviewFilter || null,
       });
       setHits(res);
     } catch (e) {
       setError(String(e));
     }
-  }, [text, minBpm, maxBpm, plugin, artist, listFilter, sortBy, dateModified, dateScanned, hasPreviewFilter]);
+  }, [text, minBpm, maxBpm, plugin, artist, listFilter, sortBy, dateModified, hasPreviewFilter]);
 
   const refreshLists = useCallback(() => {
     invoke<ListInfo[]>("get_lists").then(setLists).catch((e) => setError(String(e)));
@@ -248,6 +251,53 @@ export default function App() {
       setNewListName("");
       refreshLists();
       runSearch();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  // ---- List management (rename / delete) ----
+  const openListsModal = () => {
+    setListMenuSet(null);
+    setConfirmDeleteList(null);
+    setModalNewList("");
+    setListDrafts(Object.fromEntries(lists.map(([id, name]) => [id, name])));
+    setShowListsModal(true);
+  };
+
+  const saveListName = async (id: number) => {
+    const name = (listDrafts[id] ?? "").trim();
+    if (!name) return;
+    try {
+      await invoke("rename_list", { list_id: id, name });
+      await refreshLists();
+      runSearch(); // list label shows in the filter dropdown
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const deleteListConfirmed = async (id: number) => {
+    try {
+      await invoke("delete_list", { list_id: id });
+      if (listFilter === String(id)) setListFilter(""); // was the active filter
+      setConfirmDeleteList(null);
+      await refreshLists();
+      runSearch(); // stars may go hollow for sets only in this list
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const createListInModal = async () => {
+    const name = modalNewList.trim();
+    if (!name) return;
+    try {
+      await invoke<number>("create_list", { name });
+      setModalNewList("");
+      const fresh = await invoke<ListInfo[]>("get_lists");
+      setLists(fresh);
+      setListDrafts(Object.fromEntries(fresh.map(([id, n]) => [id, n])));
     } catch (e) {
       setError(String(e));
     }
@@ -1133,6 +1183,16 @@ export default function App() {
             <option key={id} value={String(id)}>★ {name} ({count})</option>
           ))}
         </select>
+        {lists.length > 0 && (
+          <button
+            className="sort-select"
+            onClick={openListsModal}
+            title="Rename or delete lists"
+            style={{ cursor: "pointer", padding: "0 8px" }}
+          >
+            ⚙
+          </button>
+        )}
         <select
           className="sort-select"
           value={sortBy}
@@ -1696,6 +1756,91 @@ export default function App() {
               >
                 Close
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showListsModal && (
+        <div className="modal-overlay" onClick={() => setShowListsModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="modal-title">Manage Lists</h2>
+              <button
+                className="modal-close-btn"
+                onClick={() => setShowListsModal(false)}
+                title="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="watch-section">
+              {lists.length === 0 ? (
+                <div className="empty-small">No lists yet.</div>
+              ) : (
+                <ul className="watch-list">
+                  {lists.map(([id, , count]) => {
+                    const draft = listDrafts[id] ?? "";
+                    const changed = draft.trim() !== "" && draft !== lists.find((l) => l[0] === id)?.[1];
+                    return (
+                      <li key={id} className="watch-item" style={{ gap: 8 }}>
+                        <input
+                          value={draft}
+                          onChange={(e) => setListDrafts((d) => ({ ...d, [id]: e.target.value }))}
+                          onKeyDown={(e) => { if (e.key === "Enter") saveListName(id); }}
+                          style={{ flex: 1, minWidth: 0 }}
+                        />
+                        <span style={{ opacity: 0.5, fontSize: "0.85em", whiteSpace: "nowrap" }}>
+                          {count} set{count === 1 ? "" : "s"}
+                        </span>
+                        <button
+                          className="open-btn"
+                          disabled={!changed}
+                          onClick={() => saveListName(id)}
+                          title="Rename this list"
+                        >
+                          Rename
+                        </button>
+                        {confirmDeleteList === id ? (
+                          <>
+                            <button
+                              className="open-btn danger-btn"
+                              onClick={() => deleteListConfirmed(id)}
+                            >
+                              Confirm
+                            </button>
+                            <button className="open-btn" onClick={() => setConfirmDeleteList(null)}>
+                              Cancel
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            className="watch-remove-btn"
+                            onClick={() => setConfirmDeleteList(id)}
+                            title="Delete this list (sets and files are untouched)"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
+                <input
+                  placeholder="new list…"
+                  value={modalNewList}
+                  onChange={(e) => setModalNewList(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") createListInModal(); }}
+                  style={{ flex: 1, minWidth: 0 }}
+                />
+                <button className="open-btn" onClick={createListInModal}>Create list</button>
+              </div>
+              <p className="hint" style={{ marginTop: 10 }}>
+                Deleting a list only removes the grouping — your sets and audio files are never touched.
+              </p>
             </div>
           </div>
         </div>

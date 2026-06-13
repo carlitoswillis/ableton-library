@@ -75,6 +75,8 @@ Already have a catalog? **`ableton-scan reindex-artists`** backfills artists fro
 
 Sets can be organized into **lists** — a set can belong to many at once, and "favorites" is just a list you name however you like. In the results view, each row has a **★ star** on the left: hollow when the set is in no list, filled when it's in at least one. Click it to open a little picker — check/uncheck any existing list, or type a name and **Create** to make a new one (which adds the set to it). The **All lists ▾** filter next to the search box narrows the results to one list.
 
+The **All lists ▾** filter next to the search box narrows results to one list, and the **⚙** button beside it opens **Manage Lists** — rename a list inline, delete one (with a confirm step), or create new ones.
+
 Membership is stored by the set's path, not its database row, so your lists **survive rescans** (re-ingesting a changed set won't drop it from your lists). Deleting a list just removes the grouping — never the sets or files.
 
 ## Scanning iCloud folders — read first
