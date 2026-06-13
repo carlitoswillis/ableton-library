@@ -559,23 +559,25 @@ pub fn primary_preview_stats(conn: &Connection, set_id: i64) -> Result<Option<(f
     })
 }
 
-/// Remove the primary preview for a set, deleting its file from disk.
+/// Remove the primary preview for a set, deleting its file from disk if it is a sketch.
 /// Returns the path of the deleted file if successful.
 pub fn remove_preview(conn: &Connection, set_id: i64) -> Result<Option<String>> {
-    let preview = conn.query_row(
-        "SELECT audio_path FROM previews WHERE set_id = ?1 AND is_primary = 1",
+    let preview: Option<(i64, String, String)> = conn.query_row(
+        "SELECT id, audio_path, source FROM previews WHERE set_id = ?1 AND is_primary = 1",
         params![set_id],
-        |r| r.get::<_, String>(0),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).map(Some).or_else(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => Ok(None),
         e => Err(e),
     })?;
 
-    if let Some(audio_path) = preview {
-        // DB-only: NEVER delete the audio file itself. Bounces are the user's
-        // work product; unlinking a preview must not destroy it (catalog
-        // principle: files are referenced, not owned).
-        conn.execute("DELETE FROM previews WHERE set_id = ?1 AND audio_path = ?2", params![set_id, audio_path])?;
+    if let Some((id, audio_path, source)) = preview {
+        // If it's a sketch, delete the file.
+        if source == "sketch" {
+            let _ = std::fs::remove_file(&audio_path);
+        }
+        
+        conn.execute("DELETE FROM previews WHERE id = ?1", params![id])?;
         recompute_primary(conn, set_id)?;
         Ok(Some(audio_path))
     } else {
@@ -645,6 +647,7 @@ pub struct SearchHit {
     pub time_signature: Option<String>,
     pub live_version: Option<String>,
     pub has_preview: bool,
+    pub preview_source: Option<String>,
     pub preview_duration: Option<f64>,
     /// True if this set belongs to at least one user list (drives the star).
     pub in_list: bool,
@@ -732,7 +735,8 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
         format!(
             "SELECT s.id, p.name, s.als_path, s.tempo, s.tempos_json, s.time_signature, s.live_version,
                     pv.audio_path, pv.duration, COALESCE(s.artist_override, p.artist),
-                    EXISTS (SELECT 1 FROM list_items li WHERE li.als_path = s.als_path)
+                    EXISTS (SELECT 1 FROM list_items li WHERE li.als_path = s.als_path),
+                    pv.source
              FROM search f
              JOIN sets s ON s.id = f.set_id
              JOIN projects p ON p.id = s.project_id
@@ -756,7 +760,8 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
         format!(
             "SELECT s.id, p.name, s.als_path, s.tempo, s.tempos_json, s.time_signature, s.live_version,
                     pv.audio_path, pv.duration, COALESCE(s.artist_override, p.artist),
-                    EXISTS (SELECT 1 FROM list_items li WHERE li.als_path = s.als_path)
+                    EXISTS (SELECT 1 FROM list_items li WHERE li.als_path = s.als_path),
+                    pv.source
              FROM sets s
              JOIN projects p ON p.id = s.project_id
              LEFT JOIN previews pv ON pv.set_id = s.id AND pv.is_primary = 1
@@ -803,6 +808,7 @@ pub fn search(conn: &Connection, o: &SearchOpts) -> Result<Vec<SearchHit>> {
                 time_signature: r.get(5)?,
                 live_version: r.get(6)?,
                 has_preview: preview_path.is_some(),
+                preview_source: r.get(11)?,
                 preview_duration: r.get(8)?,
                 in_list: r.get::<_, i64>(10)? != 0,
             })

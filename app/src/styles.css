@@ -406,11 +406,16 @@ header h1 {
   font-size: 11px;
   cursor: pointer;
   margin-right: 6px;
+  transition: all 0.2s;
 }
 
 .play-btn:hover {
   background: var(--accent);
   color: #16161a;
+}
+
+/* Sketch button: same style, no background override */
+.play-btn.sketch {
 }
 
 .results tr .play-btn {

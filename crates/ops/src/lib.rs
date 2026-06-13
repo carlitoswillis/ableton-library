@@ -9,6 +9,7 @@ pub mod triage;
 pub mod places;
 pub mod proxy;
 pub mod sample_index;
+pub mod sketch;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -768,9 +769,9 @@ pub fn hunt_renders(
 }
 
 /// Manually attach an audio file to a set (confidence 1.0).
-pub fn attach(conn: &Connection, set_id: i64, audio: &Path) -> Result<()> {
+pub fn attach(conn: &Connection, set_id: i64, audio: &Path, source: &str) -> Result<()> {
     let project_id = indexer::set_project_id(conn, set_id)?;
-    let row = build_preview_row(audio, Some(set_id), Some(project_id), "manual", 1.0)?;
+    let row = build_preview_row(audio, Some(set_id), Some(project_id), source, 1.0)?;
     indexer::upsert_preview(conn, &row)?;
     Ok(())
 }

@@ -228,6 +228,76 @@ async fn preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
     }
 }
 
+/// Generate a sketch preview on demand (approximate fallback render) for a set.
+#[tauri::command(rename_all = "snake_case")]
+async fn sketch_preview(set_id: i64) -> Result<Option<PreviewInfo>, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let als_path_str = indexer::set_path(&conn, set_id).map_err(|e| e.to_string())?;
+    let als_path = PathBuf::from(&als_path_str);
+    if !als_path.exists() {
+        return Err("Set file does not exist on disk".to_string());
+    }
+    
+    let mtime = std::fs::metadata(&als_path)
+        .and_then(|m| m.modified())
+        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())
+        .unwrap_or(0);
+        
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    als_path_str.hash(&mut hasher);
+    mtime.hash(&mut hasher);
+    let hash = hasher.finish();
+    
+    let cache_dir = dirs::cache_dir()
+        .ok_or_else(|| "No cache directory".to_string())?
+        .join("ableton-library")
+        .join("sketch_previews");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+    
+    let wav_filename = format!("sketch_{:x}.wav", hash);
+    let wav_path = cache_dir.join(wav_filename);
+    
+    if !wav_path.exists() {
+        let places = ops::places::get_ableton_places();
+        let parent_dir = als_path.parent().map(|p| p.to_path_buf());
+        
+        let wav_path_clone = wav_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut log = |line| eprintln!("[sketch] {}", line);
+            ops::sketch::render_sketch_file(
+                &als_path,
+                &wav_path_clone,
+                60.0,
+                parent_dir.as_deref(),
+                &places,
+                &mut log,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    }
+    
+    // Link the sketch preview into the DB as 'sketch' source
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    ops::attach(&conn, set_id, &wav_path, "sketch").map_err(|e| e.to_string())?;
+
+    let pk = previews::peaks::extract(&wav_path).map_err(|e| e.to_string())?;
+    let peaks_json = previews::peaks::to_json(&pk.peaks);
+    let peaks_val = serde_json::from_str(&peaks_json).unwrap_or(serde_json::Value::Array(vec![]));
+    
+    Ok(Some(PreviewInfo {
+        audio_path: wav_path.to_string_lossy().into_owned(),
+        duration: Some(pk.duration_secs),
+        peaks: peaks_val,
+        confidence: 0.25,
+        source: "sketch".to_string(),
+        fidelity: None,
+    }))
+}
+
 
 use tauri::Emitter;
 
@@ -892,7 +962,7 @@ async fn attach_preview(set_id: i64, audio_path: String) -> Result<(), String> {
             return Err(format!("file not found: {audio_path}"));
         }
         let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
-        ops::attach(&conn, set_id, p).map_err(|e| e.to_string())
+        ops::attach(&conn, set_id, p, "manual").map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1047,7 +1117,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             search, list_artists, reindex_artists, set_artist, set_project_artist, set_artist_bulk,
             get_lists, create_list, delete_list, rename_list, lists_for_set, add_set_to_list, remove_set_from_list,
-            inspect, stats, open_set, preview, scan_folder, cancel_scan, bulk_preview_scan,
+            inspect, stats, open_set, preview, sketch_preview, scan_folder, cancel_scan, bulk_preview_scan,
             scan_set_folder_previews, attach_preview,
             add_to_export_queue, add_to_export_queue_bulk, get_export_queue, remove_from_export_queue,
             clear_completed_jobs, clear_all_jobs, retriage_jobs, toggle_export_queue, get_export_queue_active,

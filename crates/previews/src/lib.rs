@@ -10,6 +10,7 @@
 
 pub mod matching;
 pub mod peaks;
+pub mod sketch;
 
 use std::path::{Path, PathBuf};
 

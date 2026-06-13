@@ -22,6 +22,7 @@ type SearchHit = {
   time_signature: string | null;
   live_version: string | null;
   has_preview: boolean;
+  preview_source?: string;
   preview_duration: number | null;
   in_list: boolean;
 };
@@ -203,7 +204,7 @@ export default function App() {
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [selectedSuggestions, setSelectedSuggestions] = useState<string[]>([]);
   const [linkProgress, setLinkProgress] = useState<[number, number] | null>(null);
-
+  const [sketchPrevs, setSketchPrevs] = useState<Record<number, PreviewInfo>>({});
 
   const runSearch = useCallback(async () => {
     try {
@@ -938,7 +939,8 @@ export default function App() {
         openDetail(setId);
         runSearch();
         refreshStats();
-        setError("Note: Preview unlinked — your audio file was kept on disk.");
+        // Check source from detail or hit if available, for now keep generic or rely on UI state
+        setError("Note: Preview unlinked — the sketch file was deleted, or the bounce was kept on disk.");
       }
     } catch (e) {
       setError(String(e));
@@ -958,151 +960,69 @@ export default function App() {
   const renderRowActions = (hit: SearchHit) => {
     const job = queue.find((j) => j.set_id === hit.set_id);
 
+    // 1. If we have a preview, show standard controls
     if (hit.has_preview) {
-      return (
-        <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
-          <button
-            className="play-btn"
-            title="Play preview"
-            onClick={(e) => {
-              e.stopPropagation();
-              playPreview(hit);
-            }}
-          >
-            ▶ Play
-          </button>
-          <button
-            className="play-btn"
-            style={{ borderColor: "var(--border)", color: "var(--dim)", fontSize: "11px", padding: "3px 6px" }}
-            onClick={(e) => {
-              e.stopPropagation();
-              addToQueue(hit.set_id);
-            }}
-            title="Re-render/update audio preview"
-          >
-            Update ↻
-          </button>
-          <button
-            className="open-btn"
-            title="Open in Ableton Live"
-            onClick={(e) => {
-              e.stopPropagation();
-              openInLive(hit.set_id);
-            }}
-          >
-            Open
-          </button>
-        </div>
-      );
-    } else {
-      if (job) {
-        if (job.status === "processing") {
-          return (
-            <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
-              <button
-                className="play-btn"
-                style={{ borderColor: "var(--accent)", color: "var(--accent)" }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeFromQueue(job.id);
-                }}
-                title="Rendering in background. Click to cancel."
-              >
-                ⚙️ Rendering ×
-              </button>
-              <button
-                className="open-btn"
-                title="Open in Ableton Live"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openInLive(hit.set_id);
-                }}
-              >
-                Open
-              </button>
-            </div>
-          );
-        } else if (job.status === "pending") {
-          return (
-            <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
-              <button
-                className="play-btn"
-                style={{ borderColor: "var(--dim)", color: "var(--dim)" }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeFromQueue(job.id);
-                }}
-                title="Queued (Pending). Click to remove."
-              >
-                ⏳ Queued ×
-              </button>
-              <button
-                className="open-btn"
-                title="Open in Ableton Live"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openInLive(hit.set_id);
-                }}
-              >
-                Open
-              </button>
-            </div>
-          );
-        } else {
-          return (
-            <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
-              <button
-                className="play-btn"
-                style={{ borderColor: "#ff8f8f", color: "#ff8f8f" }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  addToQueue(hit.set_id);
-                }}
-                title={`Failed: ${job.error}. Click to retry.`}
-              >
-                ❌ Retry ↻
-              </button>
-              <button
-                className="open-btn"
-                title="Open in Ableton Live"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openInLive(hit.set_id);
-                }}
-              >
-                Open
-              </button>
-            </div>
-          );
-        }
+      if (hit.preview_source === "sketch") {
+        return (
+          <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
+            <button className="play-btn sketch" title="Play sketch preview" onClick={(e) => { e.stopPropagation(); playPreview(hit); }}>▶ Preview</button>
+            <button className="play-btn" style={{ borderColor: "var(--border)", color: "var(--dim)", fontSize: "11px", padding: "3px 6px" }} onClick={(e) => { e.stopPropagation(); addToQueue(hit.set_id); }} title="Re-render/update audio preview">Update ↻</button>
+            <button className="open-btn" title="Open in Ableton Live" onClick={(e) => { e.stopPropagation(); openInLive(hit.set_id); }}>Open</button>
+          </div>
+        );
       } else {
         return (
           <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
-            <button
-              className="play-btn"
-              style={{ borderColor: "var(--border)", color: "var(--accent)" }}
-              onClick={(e) => {
-                e.stopPropagation();
-                addToQueue(hit.set_id);
-              }}
-              title="Queue audio preview render"
-            >
-              Queue Render
-            </button>
-            <button
-              className="open-btn"
-              title="Open in Ableton Live"
-              onClick={(e) => {
-                e.stopPropagation();
-                openInLive(hit.set_id);
-              }}
-            >
-              Open
-            </button>
+            <button className="play-btn" title="Play preview" onClick={(e) => { e.stopPropagation(); playPreview(hit); }}>▶ Play</button>
+            <button className="play-btn" style={{ borderColor: "var(--border)", color: "var(--dim)", fontSize: "11px", padding: "3px 6px" }} onClick={(e) => { e.stopPropagation(); addToQueue(hit.set_id); }} title="Re-render/update audio preview">Update ↻</button>
+            <button className="open-btn" title="Open in Ableton Live" onClick={(e) => { e.stopPropagation(); openInLive(hit.set_id); }}>Open</button>
           </div>
         );
       }
     }
+
+    // 2. If no preview, show Sketch + (Export Queue status or button)
+    const sketchButton = (
+      <button
+        className="play-btn sketch"
+        onClick={(e) => {
+          e.stopPropagation();
+          invoke("sketch_preview", { set_id: hit.set_id }).then(runSearch).catch((e) => setError(String(e)));
+        }}
+        title="Generate fast sketch preview"
+      >
+        Sketch
+      </button>
+    );
+
+    let jobActions = null;
+    if (job) {
+      if (job.status === "processing") {
+        jobActions = (
+          <button className="play-btn" style={{ borderColor: "var(--accent)", color: "var(--accent)" }} onClick={(e) => { e.stopPropagation(); removeFromQueue(job.id); }} title="Rendering in background. Click to cancel.">⚙️ Rendering ×</button>
+        );
+      } else if (job.status === "pending") {
+        jobActions = (
+          <button className="play-btn" style={{ borderColor: "var(--dim)", color: "var(--dim)" }} onClick={(e) => { e.stopPropagation(); removeFromQueue(job.id); }} title="Queued (Pending). Click to remove.">⏳ Queued ×</button>
+        );
+      } else {
+        jobActions = (
+          <button className="play-btn" style={{ borderColor: "#ff8f8f", color: "#ff8f8f" }} onClick={(e) => { e.stopPropagation(); addToQueue(hit.set_id); }} title={`Failed: ${job.error}. Click to retry.`}>❌ Retry ↻</button>
+        );
+      }
+    } else {
+      jobActions = (
+        <button className="play-btn" style={{ borderColor: "var(--border)", color: "var(--accent)" }} onClick={(e) => { e.stopPropagation(); addToQueue(hit.set_id); }} title="Queue automated Live export">Queue Render</button>
+      );
+    }
+
+    return (
+      <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" }}>
+        {sketchButton}
+        {jobActions}
+        <button className="open-btn" title="Open in Ableton Live" onClick={(e) => { e.stopPropagation(); openInLive(hit.set_id); }}>Open</button>
+      </div>
+    );
   };
 
   const playPreview = async (h: SearchHit) => {
@@ -1547,9 +1467,18 @@ export default function App() {
                   }
                 } else {
                   return (
-                    <button className="open-btn ghost" onClick={() => addToQueue(detail.set_id)}>
-                      Queue Render
-                    </button>
+                    <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                      <button className="open-btn ghost" onClick={() => addToQueue(detail.set_id)}>
+                        Queue Render
+                      </button>
+                      <button
+                        className="open-btn ghost"
+                        style={{ borderColor: "#e6b800", color: "#e6b800" }}
+                        onClick={() => invoke("sketch_preview", { set_id: detail.set_id }).then(() => openDetail(detail.set_id)).catch((e) => setError(String(e)))}
+                      >
+                        Sketch Render
+                      </button>
+                    </div>
                   );
                 }
               })()}

@@ -167,6 +167,22 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Generate an approximate sketch audio preview for a set.
+    Sketch {
+        /// Set id, exact path, path fragment, or path to a .als file.
+        set: String,
+        /// Path to write the output wav file.
+        #[arg(short, long)]
+        out: PathBuf,
+        /// Maximum duration in seconds.
+        #[arg(long, default_value_t = 60.0)]
+        max_seconds: f64,
+        /// Root folder to relink samples (default: project's parent directory).
+        #[arg(long)]
+        library_root: Option<PathBuf>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
 }
 
 fn db_path(opt: Option<PathBuf>) -> Result<PathBuf> {
@@ -199,6 +215,9 @@ fn main() -> Result<()> {
         Cmd::Relink { set, db } => cmd_relink(&set, db),
         Cmd::Attach { set, audio, db } => cmd_attach(&set, &audio, db),
         Cmd::Proxy { set, db } => cmd_proxy(&set, db),
+        Cmd::Sketch { set, out, max_seconds, library_root, db } => {
+            cmd_sketch(&set, &out, max_seconds, library_root, db)
+        }
         Cmd::Reset { yes, db } => cmd_reset(yes, db),
     }
 }
@@ -209,6 +228,40 @@ fn cmd_proxy(set: &str, db: Option<PathBuf>) -> Result<()> {
     let mut log = |line: String| eprintln!("  {line}");
     let path = ops::proxy::create_proxy_set(&conn, set_id, &mut log)?;
     eprintln!("proxy set created: {}", path.display());
+    Ok(())
+}
+
+fn cmd_sketch(
+    set: &str,
+    out: &Path,
+    max_seconds: f64,
+    library_root: Option<PathBuf>,
+    db: Option<PathBuf>,
+) -> Result<()> {
+    let set_path = if Path::new(set).exists() {
+        PathBuf::from(set)
+    } else {
+        let conn = indexer::open(&db_path(db)?)?;
+        let set_id = indexer::resolve_set(&conn, set)?;
+        let p_str = indexer::set_path(&conn, set_id)?;
+        PathBuf::from(p_str)
+    };
+
+    let mut log = |line: String| eprintln!("  {line}");
+    let places = ops::places::get_ableton_places();
+    let parent = set_path.parent().map(|p| p.to_path_buf());
+    let lib_root = library_root.as_deref().or(parent.as_deref());
+
+    ops::sketch::render_sketch_file(
+        &set_path,
+        out,
+        max_seconds,
+        lib_root,
+        &places,
+        &mut log,
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
     Ok(())
 }
 
@@ -307,7 +360,7 @@ fn cmd_relink(set: &str, db: Option<PathBuf>) -> Result<()> {
 fn cmd_attach(set: &str, audio: &Path, db: Option<PathBuf>) -> Result<()> {
     let conn = indexer::open(&db_path(db)?)?;
     let set_id = indexer::resolve_set(&conn, set)?;
-    ops::attach(&conn, set_id, audio)?;
+    ops::attach(&conn, set_id, audio, "manual")?;
     eprintln!("attached {} to set {set_id} (primary recomputed)", audio.display());
     Ok(())
 }
