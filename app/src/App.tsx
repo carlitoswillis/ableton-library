@@ -68,6 +68,30 @@ type ExportJob = {
   fidelity: string | null; // JSON Renderability report
 };
 
+// Queue display order: surface what needs attention first. Failed at the top
+// (need a fix/retry), then completed (confirm what worked), then the upcoming
+// pending jobs, then the one currently processing. Within a status group:
+// pending sorts by renderability score (easy-first, matching the worker), the
+// rest by newest first.
+const QUEUE_STATUS_ORDER: Record<ExportJob["status"], number> = {
+  failed: 0,
+  completed: 1,
+  pending: 2,
+  processing: 3,
+};
+
+function byQueueStatus(a: ExportJob, b: ExportJob): number {
+  const sa = QUEUE_STATUS_ORDER[a.status] ?? 99;
+  const sb = QUEUE_STATUS_ORDER[b.status] ?? 99;
+  if (sa !== sb) return sa - sb;
+  if (a.status === "pending") {
+    const ca = a.score ?? -1;
+    const cb = b.score ?? -1;
+    if (ca !== cb) return cb - ca; // higher renderability first
+  }
+  return b.id - a.id; // newest first within the group
+}
+
 type Fidelity = {
   score: number;
   plugins_total: number;
@@ -1761,7 +1785,7 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {queue.map((job) => (
+                    {[...queue].sort(byQueueStatus).map((job) => (
                       <tr key={job.id}>
                         <td>
                           <div className="queue-job-title">{job.project_name}</div>
@@ -1778,7 +1802,6 @@ export default function App() {
                           })()}
                           {job.error && (
                             <div className="job-error-container">
-                              {console.log("Job Error:", job.error)}
                               <div className="job-error-header">Error:</div>
                               <pre className="job-error-pre">
                                 {job.error}

@@ -6,6 +6,32 @@ import argparse
 import subprocess
 from datetime import datetime
 
+# Distinct exit code for a SYSTEMIC failure: macOS has not granted the
+# controlling app Accessibility permission, so System Events refuses to send
+# keystrokes (error 1002 / -1719). This is NOT a per-set problem — every job
+# will fail identically — so the worker treats this code specially (pauses the
+# whole queue) instead of grinding through and failing every set.
+PERMISSION_EXIT_CODE = 42
+
+# Signatures of the "not trusted for Accessibility" failure, matched
+# case-insensitively against AppleScript stderr.
+PERMISSION_ERROR_SIGNATURES = (
+    "is not allowed to send keystrokes",
+    "is not allowed assistive access",
+    "(1002)",
+    "-1719",
+    "osax",
+)
+
+
+def is_permission_error(text):
+    """True if AppleScript output indicates a missing Accessibility grant."""
+    if not text:
+        return False
+    low = text.lower()
+    return any(sig in low for sig in PERMISSION_ERROR_SIGNATURES)
+
+
 def log(msg, is_error=False):
     timestamp = datetime.now().strftime("%H:%M:%S")
     stream = sys.stderr if is_error else sys.stdout
@@ -351,6 +377,16 @@ def main():
     if code != 0:
         # stderr (the [AS] narration incl. the error) was already surfaced
         # line-by-line by run_applescript — don't dump it twice.
+        if is_permission_error(stderr) or is_permission_error(stdout):
+            log(
+                "PERMISSION ERROR: macOS will not let this app send keystrokes. "
+                "Grant Accessibility access (System Settings -> Privacy & Security "
+                "-> Accessibility), enable the Ableton Library app (toggle it off/on "
+                "if it's already listed — a rebuild can silently invalidate the grant), "
+                "then re-enable Auto-Export. Halting queue.",
+                is_error=True,
+            )
+            sys.exit(PERMISSION_EXIT_CODE)
         log(f"AppleScript failed with exit code: {code}", is_error=True)
         if stdout:
             log(f"AppleScript Stdout:\n{stdout}", is_error=True)

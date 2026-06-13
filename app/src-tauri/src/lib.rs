@@ -505,6 +505,11 @@ async fn export_worker_loop(app: tauri::AppHandle) {
 
         let mut error_msg = None;
         let mut success = false;
+        // Set when the export script reports a SYSTEMIC Accessibility-permission
+        // failure (sentinel exit code 42, or the keystroke-1002 signature in the
+        // logs). Such a failure is identical for every job, so we pause the whole
+        // queue instead of grinding through and failing all of them.
+        let mut permission_failure = false;
 
         if fresh_existing {
             log(format!("[worker] found fresh existing render: {}", expected_output.display()));
@@ -604,6 +609,9 @@ async fn export_worker_loop(app: tauri::AppHandle) {
                                 if let Ok(status) = res {
                                     if status.success() {
                                         success = true;
+                                    } else if status.code() == Some(42) {
+                                        permission_failure = true;
+                                        error_msg = Some(PERMISSION_ERROR_MSG.into());
                                     } else {
                                         error_msg = Some(format!("Script failed with exit code {}", status.code().unwrap_or(-1)));
                                     }
@@ -639,6 +647,20 @@ async fn export_worker_loop(app: tauri::AppHandle) {
                 }
                 Err(e) => {
                     error_msg = Some(format!("Failed to spawn export script: {e}"));
+                }
+            }
+
+            // Belt-and-suspenders: even if the sentinel exit code didn't survive
+            // (e.g. the script was killed), recognise the keystroke-permission
+            // signature in the captured logs and treat it as systemic.
+            if !success && !permission_failure {
+                let logs = log_output.lock().unwrap().to_lowercase();
+                if logs.contains("not allowed to send keystrokes")
+                    || logs.contains("(1002)")
+                    || logs.contains("-1719")
+                {
+                    permission_failure = true;
+                    error_msg = Some(PERMISSION_ERROR_MSG.into());
                 }
             }
 
@@ -693,9 +715,26 @@ async fn export_worker_loop(app: tauri::AppHandle) {
                 let _ = indexer::update_export_job_status(&conn, job_id, "failed", Some(&detailed_err));
             }
         }
+
+        // A missing Accessibility grant fails identically for every job. Pause
+        // the queue so we don't burn through (and proxy-churn) the whole backlog
+        // — the user fixes permissions, then re-enables Auto-Export.
+        if permission_failure {
+            let state = app.state::<ExportState>();
+            state.active.store(false, Ordering::Relaxed);
+            let _ = state.tx.send(false);
+            log("[worker] Accessibility permission missing — Auto-Export paused. \
+                 Grant Accessibility access to the app in System Settings, then re-enable."
+                .into());
+        }
+
         let _ = app.emit("export-queue-updated", ());
     }
 }
+
+/// Shown on a job and logged when automated rendering is blocked because macOS
+/// hasn't granted the app Accessibility permission (keystroke error 1002).
+const PERMISSION_ERROR_MSG: &str = "Automated rendering is blocked: macOS hasn't granted this app Accessibility permission, so it can't send keystrokes to drive Ableton Live.\n\nFix: System Settings → Privacy & Security → Accessibility → enable the Ableton Library app. If it's already listed, toggle it OFF and ON (rebuilding the app silently invalidates the grant). Then turn Auto-Export back on.\n\nThe queue has been paused so the rest of your jobs weren't burned.";
 
 /// Index a folder of Ableton projects (incremental; harvests in-folder
 /// renders as previews). Same engine as `ableton-scan scan`.
