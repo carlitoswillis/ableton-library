@@ -2042,8 +2042,16 @@ export default function App() {
                           }
                           g.items.push(s);
                         }
-                        // Sets still missing a preview come first.
-                        groups.sort((a, b) => Number(a.has_preview) - Number(b.has_preview));
+                        // Sets still missing a preview come first. Within each group,
+                        // sort by highest confidence score of the best match.
+                        groups.sort((a, b) => {
+                          if (a.has_preview !== b.has_preview) {
+                            return Number(a.has_preview) - Number(b.has_preview);
+                          }
+                          const maxA = Math.max(...a.items.map((i) => i.confidence));
+                          const maxB = Math.max(...b.items.map((i) => i.confidence));
+                          return maxB - maxA;
+                        });
 
                         return groups.flatMap((g) => [
                           <tr key={`g${g.set_id}`} className="suggestion-group">
