@@ -147,17 +147,26 @@ export default function SimilarityMap({
         <span style={{ color: "#8b93a2" }}>
           {graph ? `${graph.nodes.length} sets · ${graph.edges.length} links` : err ? "error" : "loading…"}
         </span>
-        {hover && (
-          <span style={{ color: "#fff", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            · {hover.name}
-          </span>
-        )}
         <span style={{ color: "#8b93a2", marginLeft: 8 }}>color:</span>
         {MODES.map((m) => (
           <button key={m} className={mode === m ? "on" : ""} onClick={() => setMode(m)}>
             {m}
           </button>
         ))}
+        <span
+          title={sel?.name}
+          style={{
+            flex: "0 0 240px",
+            width: 240,
+            marginLeft: 10,
+            color: "#fff",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {sel ? sel.name : ""}
+        </span>
         <div style={{ flex: 1 }} />
         <button onClick={load} title="Recompute from the current catalog">↻ Reload</button>
         <button onClick={onClose}>✕ Close</button>
