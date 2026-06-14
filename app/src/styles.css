@@ -1116,3 +1116,59 @@ input:checked + .slider:before {
   text-overflow: ellipsis;
   max-width: 420px;
 }
+
+/* ---- Similarity Map overlay ---- */
+.map-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: #0d0f13;
+  display: flex;
+  flex-direction: column;
+}
+.map-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 46px;
+  padding: 0 12px;
+  border-bottom: 1px solid #2a3140;
+  background: #11151c;
+}
+.map-toolbar strong { color: #fff; }
+.map-toolbar button {
+  background: #1a1e26;
+  color: #cdd3dc;
+  border: 1px solid #2a3140;
+  border-radius: 6px;
+  padding: 4px 9px;
+  cursor: pointer;
+  text-transform: capitalize;
+}
+.map-toolbar button.on { background: #2d6cdf; border-color: #2d6cdf; color: #fff; }
+.map-error { color: #ff6b6b; padding: 6px 12px; }
+.map-info {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  width: 244px;
+  background: #11151c;
+  border: 1px solid #2a3140;
+  border-radius: 8px;
+  padding: 12px;
+  color: #cdd3dc;
+  box-shadow: 0 8px 28px #0009;
+}
+.map-info-name { font-weight: 600; color: #fff; margin-bottom: 6px; word-break: break-word; }
+.map-info-meta { color: #8b93a2; font-size: 12px; line-height: 1.55; }
+.map-info-actions { display: flex; gap: 8px; margin-top: 10px; }
+.map-info-actions button {
+  flex: 1;
+  background: #1a1e26;
+  color: #cdd3dc;
+  border: 1px solid #2a3140;
+  border-radius: 6px;
+  padding: 6px;
+  cursor: pointer;
+}
+.map-info-actions button:hover { border-color: #2d6cdf; }

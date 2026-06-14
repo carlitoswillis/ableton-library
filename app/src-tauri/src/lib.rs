@@ -50,6 +50,15 @@ async fn search(
     .map_err(|e| e.to_string())
 }
 
+/// Build the set-similarity graph (nodes + kNN edges + clusters) for the Map
+/// view. Heavy-ish read over the whole catalog; computed on demand.
+#[tauri::command(rename_all = "snake_case")]
+async fn similarity_graph() -> Result<ops::similarity::GraphData, String> {
+    let conn = indexer::open(&db_path()?).map_err(|e| e.to_string())?;
+    let sets = indexer::load_graph_features(&conn).map_err(|e| e.to_string())?;
+    Ok(ops::similarity::build_graph(&sets, 10))
+}
+
 // ---- User lists (favorites + collections) --------------------------------
 
 /// All lists as (id, name, item_count).
@@ -1123,7 +1132,8 @@ pub fn run() {
             retry_failed_jobs, remove_preview,
             add_watch_folder, remove_watch_folder, list_watch_folders,
             get_watch_suggestions, ignore_watch_suggestion, link_watch_suggestion,
-            link_watch_suggestions, create_proxy_set
+            link_watch_suggestions, create_proxy_set,
+            similarity_graph
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

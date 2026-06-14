@@ -9,6 +9,7 @@ pub mod triage;
 pub mod places;
 pub mod proxy;
 pub mod sample_index;
+pub mod similarity;
 pub mod sketch;
 
 use std::collections::HashSet;

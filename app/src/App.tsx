@@ -3,6 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import PlayerBar, { PlayerTrack } from "./PlayerBar";
+import SimilarityMap from "./SimilarityMap";
 
 type ScanSummary = {
   indexed: number;
@@ -199,6 +200,7 @@ export default function App() {
   const [queueActive, setQueueActive] = useState(false);
   const [showQueueModal, setShowQueueModal] = useState(false);
   const [showWatchModal, setShowWatchModal] = useState(false);
+  const [showMap, setShowMap] = useState(false);
   const [watchFolders, setWatchFolders] = useState<[number, string][]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
@@ -1050,6 +1052,33 @@ export default function App() {
     }
   };
 
+  // Play a set by id (used by the Similarity Map). Plays the real preview if
+  // one exists; otherwise generates a sketch on the fly, then plays it.
+  const playById = async (setId: number, title: string) => {
+    try {
+      setError(null);
+      let p = await invoke<PreviewInfo | null>("preview", { set_id: setId });
+      if (!p) {
+        await invoke("sketch_preview", { set_id: setId });
+        p = await invoke<PreviewInfo | null>("preview", { set_id: setId });
+      }
+      if (!p) {
+        setError("No preview available for this set.");
+        return;
+      }
+      setTrack({
+        setId,
+        title,
+        subtitle: p.source,
+        src: convertFileSrc(p.audio_path),
+        peaks: p.peaks,
+        duration: p.duration,
+      });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   // Play the open set's current primary preview (detail pane).
   const playDetailPreview = async () => {
     if (!detail) return;
@@ -1128,6 +1157,14 @@ export default function App() {
           }}
         >
           Watch Folders {suggestions.length > 0 && `(${suggestions.length})`}
+        </button>
+        <button
+          className="scan-btn"
+          style={{ marginLeft: "10px" }}
+          onClick={() => setShowMap(true)}
+          title="Open the 3D similarity map of your library"
+        >
+          🌌 Map
         </button>
 
       </header>
@@ -2231,6 +2268,14 @@ export default function App() {
             </div>
           </div>
         </>
+      )}
+
+      {showMap && (
+        <SimilarityMap
+          onOpen={(id) => openDetail(id)}
+          onPlay={(id, title) => playById(id, title)}
+          onClose={() => setShowMap(false)}
+        />
       )}
 
     </div>

@@ -1477,6 +1477,137 @@ pub fn is_match_ignored(conn: &Connection, set_id: i64, audio_path: &str) -> Res
     Ok(count > 0)
 }
 
+/// Per-set features for the similarity graph (see ai/SIMILARITY_GRAPH_DESIGN.md).
+/// Plain data — the blend / kNN / clustering live in `ops::similarity`.
+#[derive(Debug, Clone)]
+pub struct GraphSet {
+    pub id: i64,
+    pub name: String,         // als file stem, lowercased
+    pub tempo: Option<f64>,
+    pub artist: String,       // resolved (override > project), lowercased; "" if none
+    pub project_id: i64,
+    pub has_preview: bool,    // a REAL bounce (never a sketch)
+    pub samples: Vec<String>, // lowercased basenames
+    pub devices: Vec<String>, // "manufacturer:name" lowercased
+    pub text: String,         // set name + track names, for tokenizing
+}
+
+/// Load every set with the features the similarity graph needs (one pass each
+/// over sets/samples/devices/tracks/previews, aggregated in memory).
+pub fn load_graph_features(conn: &Connection) -> Result<Vec<GraphSet>> {
+    use std::collections::HashMap;
+
+    fn stem_lower(p: &str) -> String {
+        let p = p.replace('\\', "/");
+        let base = p.rsplit('/').next().unwrap_or(&p);
+        base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base).to_lowercase()
+    }
+    fn base_lower(p: &str) -> String {
+        let p = p.replace('\\', "/");
+        p.rsplit('/').next().unwrap_or(&p).to_lowercase()
+    }
+
+    let mut idx: HashMap<i64, usize> = HashMap::new();
+    let mut out: Vec<GraphSet> = Vec::new();
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.als_path, s.tempo, \
+                    COALESCE(NULLIF(s.artist_override,''), NULLIF(p.artist,''), '') AS artist, \
+                    s.project_id \
+             FROM sets s JOIN projects p ON p.id = s.project_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<f64>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, path, tempo, artist, project_id) = row?;
+            let name = stem_lower(&path);
+            idx.insert(id, out.len());
+            out.push(GraphSet {
+                id,
+                name: name.clone(),
+                tempo,
+                artist: artist.to_lowercase(),
+                project_id,
+                has_preview: false,
+                samples: Vec::new(),
+                devices: Vec::new(),
+                text: name,
+            });
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare("SELECT set_id, path FROM samples")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (sid, path) = row?;
+            if let Some(&i) = idx.get(&sid) {
+                out[i].samples.push(base_lower(&path));
+            }
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare("SELECT set_id, manufacturer, name FROM devices")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (sid, manu, name) = row?;
+            if let Some(&i) = idx.get(&sid) {
+                let key = format!(
+                    "{}:{}",
+                    manu.unwrap_or_default().to_lowercase(),
+                    name.unwrap_or_default().to_lowercase()
+                );
+                if key != ":" {
+                    out[i].devices.push(key);
+                }
+            }
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare("SELECT set_id, name FROM tracks WHERE name IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (sid, name) = row?;
+            if let Some(&i) = idx.get(&sid) {
+                out[i].text.push(' ');
+                out[i].text.push_str(&name.to_lowercase());
+            }
+        }
+    }
+
+    {
+        // real previews only — the sketch is NOT a feature source (user decision).
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT set_id FROM previews \
+             WHERE set_id IS NOT NULL AND source <> 'sketch' AND audio_path <> ''",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        for row in rows {
+            let sid = row?;
+            if let Some(&i) = idx.get(&sid) {
+                out[i].has_preview = true;
+            }
+        }
+    }
+
+    Ok(out)
+}
 
 #[cfg(test)]
 mod tests {
