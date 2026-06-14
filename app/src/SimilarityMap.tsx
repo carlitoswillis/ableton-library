@@ -36,6 +36,7 @@ export default function SimilarityMap({
   const [sel, setSel] = useState<GNode | null>(null);
   const [size, setSize] = useState({ w: window.innerWidth, h: window.innerHeight - 46 });
   const [hover, setHover] = useState<GNode | null>(null); // nearest-to-cursor node
+  const [showLinks, setShowLinks] = useState(false); // links are costly; off by default
   const fgRef = useRef<any>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const mouseRef = useRef<{ x: number; y: number } | null>(null);
@@ -153,6 +154,13 @@ export default function SimilarityMap({
             {m}
           </button>
         ))}
+        <button
+          className={showLinks ? "on" : ""}
+          onClick={() => setShowLinks((v) => !v)}
+          title="Show/hide similarity links (off is faster)"
+        >
+          links
+        </button>
         <span
           title={sel?.name}
           style={{
@@ -186,19 +194,19 @@ export default function SimilarityMap({
           height={size.h}
           graphData={data as any}
           nodeId="id"
-          nodeLabel={(n: any) =>
-            `${n.name}  ·  ${n.tempo ? n.tempo.toFixed(0) + "bpm" : "—"}  ·  ${n.artist || "no artist"}`
-          }
           nodeColor={(n: any) => (n.id === hover?.id ? "#ffffff" : nodeColor(n))}
           nodeVal={(n: any) => (n.id === hover?.id ? 6 : 1)}
           nodeRelSize={4}
           nodeOpacity={0.92}
-          linkColor={() => "rgba(140,160,200,0.12)"}
+          nodeResolution={6}
+          linkVisibility={() => showLinks}
+          linkColor={() => "rgba(140,160,200,0.14)"}
           linkWidth={0.4}
           backgroundColor="#0d0f13"
-          warmupTicks={40}
-          cooldownTicks={120}
-          onNodeClick={(n: any) => setSel(n as GNode)}
+          warmupTicks={20}
+          cooldownTicks={80}
+          enablePointerInteraction={false}
+          enableNodeDrag={false}
         />
       </div>
       {sel && (
