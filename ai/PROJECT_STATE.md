@@ -1,6 +1,6 @@
 # Project State
 
-## 🌌 SET SIMILARITY GRAPH — Phase 1 BUILT (2026-06-13, unverified on host)
+## 🌌 SET SIMILARITY GRAPH — Phase 1 WORKING on host (2026-06-13)
 - **What**: an alternative "map" view of the 2000+ sets — a 3D galaxy where similar sets cluster together, colorized, opened as an **open/close full-screen overlay** (header "🌌 Map" button), NOT inline. Design + locked decisions in `ai/SIMILARITY_GRAPH_DESIGN.md`.
 - **Prototype (oracle)**: `tools/similarity_map.py` reads the catalog DB, computes the blend + kNN + clusters, writes a standalone HTML map. Validated on real data (2379 sets → 152 clusters, artist-coherent; e.g. one cluster is entirely "9:19"). This is the reference for the Rust port, like `sketch_render.py`.
 - **In-app implementation (Phase 1)**: metadata blend only — shared samples (Jaccard), devices (Jaccard), tempo (half/double-aware), artist/project prior (strong bond), name TF-IDF. kNN via inverted index; weighted label-propagation clusters; **no Rust layout** (react-force-graph-3d lays out in 3D client-side).
@@ -8,8 +8,15 @@
   - `ops::similarity::build_graph(&sets, k) -> GraphData{nodes,edges}` (new) — faithful port of the prototype.
   - Tauri cmd `similarity_graph()` in `app/src-tauri/src/lib.rs` (registered).
   - Frontend `app/src/SimilarityMap.tsx` (new) — ForceGraph3D, color-by toggles (cluster/tempo/artist/preview), node click → info card with Play / Open-detail. Wired into `App.tsx` via `showMap` overlay; `playById` plays the real preview or generates a sketch on the fly. New deps: `react-force-graph-3d`, `three` (+ `@types/three`).
+  - Polish (2026-06-13): the overlay **mounts once and hides/shows** (so it doesn't refetch/re-simulate on every open) + a ↻ Reload button to recompute on demand; **snap-to-nearest** cursor targeting (projects nodes via `graph2ScreenCoords`, highlights/clicks the closest node within ~34px so you don't need pixel-precise aim); `graphData` is `useMemo`'d so hover re-renders never restart the 3D layout.
 - **NOT in yet**: MIDI **key** and **audio sounds-alike** (real bounces only) — the two signals the user most wants; next iteration. Weights for them are reserved in the blend.
-- **Caveats**: NOT compiler-verified (no Rust toolchain in agent sandbox) and the frontend isn't build-tested — needs `npm install` in `app/` + `cargo build` + `npm run tauri dev` on host. The three.js dep is the main build risk. The big "carlitos" cluster (~176) is a catch-all from the strong artist weight; expected to split once key/audio land.
+- **Status (2026-06-13)**: builds and runs in the app (user-confirmed). The big "carlitos" cluster (~176) is a catch-all from the strong artist weight; expected to split once key/audio land.
+- **BACKLOG — performance (user: "slows the whole app down here and there")**: the 3D map is the main perf cost. Known/likely causes + mitigations:
+  - *Hidden-but-mounted render loop*: the overlay mounts once and hides/shows; react-force-graph kept its WebGL animation loop running while hidden. **Fixed (2026-06-13)**: pause via `fgRef.pauseAnimation()` when `!visible`, resume on show. Verify this resolved the background drag.
+  - *Continuous 3D render while open*: three.js renders every frame even when idle; inherent. Options: lower `cooldownTicks`, stop the engine once settled (`onEngineStop`), or throttle. Acceptable when the map is the focus, but watch CPU.
+  - *Snap-to-nearest projects all ~2379 nodes per rAF on mousemove* (`graph2ScreenCoords`). Fine so far; if it bites, spatial-bin the screen projections or cap to a frustum/region.
+  - *Backend `similarity_graph` recomputes from scratch* (sync work inside an async Tauri command) — blocks the async runtime ~1–2s on first open / Reload. Mitigations: `spawn_blocking`, and/or cache `GraphData` keyed by catalog `content_hash` (invalidate on scan). Not yet done.
+  - *Whole graph held in memory + large JSON to the webview* (~2379 nodes + ~12k edges) — fine at this size; revisit if the catalog grows a lot.
 - **DB copy**: `library.db` was copied into the repo root so the agent could run the Python prototype; it's gitignored (`*.db`) and disposable — the real catalog lives in the app-data dir and is untouched.
 
 ## ⚡ SKETCH / APPROXIMATE PREVIEW RENDERER (2026-06-13 — Python prototype validated; Rust engine ported)

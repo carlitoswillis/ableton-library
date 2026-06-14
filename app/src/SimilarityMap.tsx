@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ForceGraph3D from "react-force-graph-3d";
 
@@ -35,7 +35,13 @@ export default function SimilarityMap({
   const [mode, setMode] = useState<ColorMode>("cluster");
   const [sel, setSel] = useState<GNode | null>(null);
   const [size, setSize] = useState({ w: window.innerWidth, h: window.innerHeight - 46 });
+  const [hover, setHover] = useState<GNode | null>(null); // nearest-to-cursor node
   const fgRef = useRef<any>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const mouseRef = useRef<{ x: number; y: number } | null>(null);
+  const downRef = useRef<{ x: number; y: number } | null>(null);
+  const draggedRef = useRef(false);
+  const rafRef = useRef<number | null>(null);
 
   // Fetch + graph ONCE; the component stays mounted (hidden) between opens, so
   // it never re-fetches or re-simulates. Use ↻ Reload to recompute on demand.
@@ -55,6 +61,16 @@ export default function SimilarityMap({
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  // The component stays mounted between opens, but react-force-graph keeps its
+  // WebGL render loop running even while hidden — which drags the whole app
+  // down. Pause the animation when not visible, resume when shown.
+  useEffect(() => {
+    const fg = fgRef.current;
+    if (!fg) return;
+    if (visible) fg.resumeAnimation?.();
+    else fg.pauseAnimation?.();
+  }, [visible]);
+
   const clusterColor = (c: number) => `hsl(${(c * 137.508) % 360},65%,60%)`;
   const artistHue = (a: string) => {
     let h = 0;
@@ -72,11 +88,57 @@ export default function SimilarityMap({
     return n.has_preview ? "#36d07a" : "#caa23a"; // preview status
   };
 
-  // react-force-graph mutates link source/target into node refs, so hand it a
-  // fresh copy each render is unnecessary — it keeps its own internal state.
-  const data = graph
-    ? { nodes: graph.nodes, links: graph.edges }
-    : { nodes: [], links: [] };
+  // Snap-to-nearest: project every node to screen and pick the closest to the
+  // cursor within a generous radius, so you don't have to land on the tiny dot.
+  const pickNearest = () => {
+    rafRef.current = null;
+    const fg = fgRef.current;
+    const m = mouseRef.current;
+    if (!fg || !m || !graph || typeof fg.graph2ScreenCoords !== "function") return;
+    let bestNode: GNode | null = null;
+    let bd = 34 * 34; // px radius²
+    for (const n of graph.nodes as any[]) {
+      if (n.x == null) continue; // not laid out yet
+      const sc = fg.graph2ScreenCoords(n.x, n.y, n.z ?? 0);
+      const dx = sc.x - m.x;
+      const dy = sc.y - m.y;
+      const d = dx * dx + dy * dy;
+      if (d < bd) {
+        bd = d;
+        bestNode = n as GNode;
+      }
+    }
+    setHover((prev) => (prev?.id === bestNode?.id ? prev : bestNode));
+  };
+  const onMove = (e: React.MouseEvent) => {
+    const r = wrapRef.current?.getBoundingClientRect();
+    if (!r) return;
+    mouseRef.current = { x: e.clientX - r.left, y: e.clientY - r.top };
+    if (downRef.current) {
+      // Button held = orbiting. Skip the (expensive, all-nodes) nearest
+      // projection entirely so rotation stays smooth.
+      const dx = e.clientX - downRef.current.x;
+      const dy = e.clientY - downRef.current.y;
+      if (dx * dx + dy * dy > 16) draggedRef.current = true;
+      return;
+    }
+    if (rafRef.current == null) rafRef.current = requestAnimationFrame(pickNearest);
+  };
+  const onDown = (e: React.MouseEvent) => {
+    downRef.current = { x: e.clientX, y: e.clientY };
+    draggedRef.current = false;
+  };
+  const onUp = () => {
+    if (!draggedRef.current && hover) setSel(hover); // a click (not a drag) selects nearest
+    downRef.current = null;
+  };
+
+  // Stable reference across re-renders (hover etc.) so react-force-graph never
+  // re-ingests the data and restarts the 3D simulation. Only changes on reload.
+  const data = useMemo(
+    () => (graph ? { nodes: graph.nodes, links: graph.edges } : { nodes: [], links: [] }),
+    [graph]
+  );
 
   return (
     <div className="map-overlay" style={{ display: visible ? "flex" : "none" }}>
@@ -85,6 +147,11 @@ export default function SimilarityMap({
         <span style={{ color: "#8b93a2" }}>
           {graph ? `${graph.nodes.length} sets · ${graph.edges.length} links` : err ? "error" : "loading…"}
         </span>
+        {hover && (
+          <span style={{ color: "#fff", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            · {hover.name}
+          </span>
+        )}
         <span style={{ color: "#8b93a2", marginLeft: 8 }}>color:</span>
         {MODES.map((m) => (
           <button key={m} className={mode === m ? "on" : ""} onClick={() => setMode(m)}>
@@ -96,26 +163,35 @@ export default function SimilarityMap({
         <button onClick={onClose}>✕ Close</button>
       </div>
       {err && <div className="map-error">{err}</div>}
-      <ForceGraph3D
-        ref={fgRef}
-        width={size.w}
-        height={size.h}
-        graphData={data as any}
-        nodeId="id"
-        nodeLabel={(n: any) =>
-          `${n.name}  ·  ${n.tempo ? n.tempo.toFixed(0) + "bpm" : "—"}  ·  ${n.artist || "no artist"}`
-        }
-        nodeColor={(n: any) => nodeColor(n)}
-        nodeRelSize={4}
-        nodeOpacity={0.92}
-        linkColor={() => "rgba(140,160,200,0.12)"}
-        linkWidth={0.4}
-        backgroundColor="#0d0f13"
-        warmupTicks={40}
-        cooldownTicks={120}
-        onNodeClick={(n: any) => setSel(n as GNode)}
-        onBackgroundClick={() => setSel(null)}
-      />
+      <div
+        ref={wrapRef}
+        style={{ flex: 1, position: "relative" }}
+        onMouseMove={onMove}
+        onMouseDown={onDown}
+        onMouseUp={onUp}
+        onMouseLeave={() => setHover(null)}
+      >
+        <ForceGraph3D
+          ref={fgRef}
+          width={size.w}
+          height={size.h}
+          graphData={data as any}
+          nodeId="id"
+          nodeLabel={(n: any) =>
+            `${n.name}  ·  ${n.tempo ? n.tempo.toFixed(0) + "bpm" : "—"}  ·  ${n.artist || "no artist"}`
+          }
+          nodeColor={(n: any) => (n.id === hover?.id ? "#ffffff" : nodeColor(n))}
+          nodeVal={(n: any) => (n.id === hover?.id ? 6 : 1)}
+          nodeRelSize={4}
+          nodeOpacity={0.92}
+          linkColor={() => "rgba(140,160,200,0.12)"}
+          linkWidth={0.4}
+          backgroundColor="#0d0f13"
+          warmupTicks={40}
+          cooldownTicks={120}
+          onNodeClick={(n: any) => setSel(n as GNode)}
+        />
+      </div>
       {sel && (
         <div className="map-info">
           <div className="map-info-name">{sel.name}</div>

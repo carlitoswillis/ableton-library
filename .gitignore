@@ -22,3 +22,6 @@ __pycache__/
 
 # debug dumps
 triage.txt
+
+# generated similarity-map prototype output (contains catalog data)
+similarity_map.html

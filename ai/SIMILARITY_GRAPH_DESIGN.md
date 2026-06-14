@@ -1,6 +1,11 @@
 # Set Similarity Graph — alternative "map" views of the library
 
-DESIGN — v2 (decisions locked 2026-06-13). Not built yet. Author: handoff agent.
+DESIGN — v2 (decisions locked 2026-06-13). **Phase 1 SHIPPED & working in-app
+(2026-06-13)**: `indexer::load_graph_features` + `ops::similarity::build_graph`
++ Tauri `similarity_graph` + `app/src/SimilarityMap.tsx` (react-force-graph-3d
+overlay). Metadata blend only so far (samples/devices/tempo/artist/names); MIDI
+key + audio sounds-alike still pending. See PROJECT_STATE.md for the running log
+and the performance backlog. Author: handoff agent.
 Source of intent: user — "a graph type thing where sets group closer or farther
 depending on similarities, colorized… so I can jump around even more with this
 large database of sets… alternative views in addition to the long list, for
@@ -246,7 +251,12 @@ separate app.
 - **Similarity quality tracks data coverage** — if `samples`/`devices` are thin
   for many sets, early clusters lean on names/tempo; validate on the real catalog.
 - **Perf** — 2000 nodes is fine; the O(n²) feature step needs the inverted-index
-  shortcut, and force layout belongs in a Web Worker to keep the UI smooth.
+  shortcut (done). **Observed in Phase 1 (user, 2026-06-13): the 3D map slows the
+  whole app at times.** Biggest cause was the hidden-but-mounted WebGL render loop
+  (fixed: pause on `!visible`). Remaining levers: stop the engine once settled
+  (`onEngineStop`/low `cooldownTicks`), `spawn_blocking` + cache the backend
+  `GraphData` (recomputes from scratch each call), and bound the snap-to-nearest
+  projection (all nodes per mousemove frame). See PROJECT_STATE.md perf backlog.
 - **Position instability** can disorient — seed force layouts deterministically
   and persist coords so the map doesn't "jump" between sessions.
 - **Scope** — this is a multi-week addition. Phase 1 alone is a real feature; ship

@@ -403,25 +403,32 @@ crates/als-core/src/scan.rs      discover(); iso_mtime()
 crates/previews/src/lib.rs       discover_renders() (RenderFile)
 crates/previews/src/matching.rs  normalize/score/best_match
 crates/previews/src/peaks.rs     symphonia waveform peak extraction
-crates/indexer/src/lib.rs        SCHEMA*, open()/migrations, ingest, search, all CRUD
+crates/previews/src/sketch/parser.rs  sketch: independent .als pass (clips/notes/instruments)
+crates/previews/src/sketch/engine.rs  sketch: render mixdown (port of tools/sketch_render.py)
+crates/indexer/src/lib.rs        SCHEMA*, open()/migrations, ingest, search, all CRUD; load_graph_features()
 crates/ops/src/lib.rs            scan_library, harvest/hunt, link suggestions, reindex_artists
 crates/ops/src/artist.rs         path -> artist inference (+ tests)
 crates/ops/src/triage.rs         renderability, plugin inventory, sample relink, icloud
 crates/ops/src/proxy.rs          proxy .als writer (relinked copy)
 crates/ops/src/sample_index.rs   one-pass recursive sample lookup index
 crates/ops/src/places.rs         Ableton Library.cfg "Places" parser
-crates/cli/src/main.rs           ableton-scan binary; Cmd enum; cmd_* wrappers
-app/src-tauri/src/lib.rs         Tauri commands + export_worker_loop
+crates/ops/src/sketch.rs         sketch render workflow (relink + render + wav)
+crates/ops/src/similarity.rs     similarity-graph blend / kNN / clustering -> GraphData
+crates/cli/src/main.rs           ableton-scan binary; Cmd enum; cmd_* wrappers (incl. `sketch`)
+app/src-tauri/src/lib.rs         Tauri commands (incl. sketch_preview, similarity_graph) + export_worker_loop
 app/src/App.tsx                  the entire React UI
 app/src/PlayerBar.tsx            waveform player
+app/src/SimilarityMap.tsx        3D similarity-map overlay (react-force-graph-3d)
 app/src/styles.css               dark theme
 tools/reference_extract.py       THE ORACLE — parser spec/test
 tools/export_set.py              macOS UI automation: drive Live's File->Export
-tools/sketch_render.py           approximate "sketch" preview PROTOTYPE (no Ableton; see handoff)
+tools/sketch_render.py           approximate "sketch" preview ORACLE (no Ableton; ported to Rust)
+tools/similarity_map.py          similarity-map ORACLE (DB -> blend/kNN/clusters -> HTML)
 ai/PROJECT_STATE.md              running log + handoff snapshots (read first)
 ai/AGENTS.md                     rules for contributors (human + AI)
 ai/ARCHITECTURE.md               high-level decisions & data flow
 ai/SKETCH_RENDER_HANDOFF.md      sketch renderer: .als spec, algorithm, Rust-port + UI plan
+ai/SIMILARITY_GRAPH_DESIGN.md    similarity map: signals/blend, layout, phases, perf backlog
 CODEBASE_GUIDE.md                this file (repo root)
 ```
 
