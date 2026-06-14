@@ -201,6 +201,7 @@ export default function App() {
   const [showQueueModal, setShowQueueModal] = useState(false);
   const [showWatchModal, setShowWatchModal] = useState(false);
   const [showMap, setShowMap] = useState(false);
+  const [mapMounted, setMapMounted] = useState(false); // mount once, then keep alive
   const [watchFolders, setWatchFolders] = useState<[number, string][]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
@@ -1161,7 +1162,7 @@ export default function App() {
         <button
           className="scan-btn"
           style={{ marginLeft: "10px" }}
-          onClick={() => setShowMap(true)}
+          onClick={() => { setMapMounted(true); setShowMap(true); }}
           title="Open the 3D similarity map of your library"
         >
           🌌 Map
@@ -2270,8 +2271,9 @@ export default function App() {
         </>
       )}
 
-      {showMap && (
+      {mapMounted && (
         <SimilarityMap
+          visible={showMap}
           onOpen={(id) => openDetail(id)}
           onPlay={(id, title) => playById(id, title)}
           onClose={() => setShowMap(false)}

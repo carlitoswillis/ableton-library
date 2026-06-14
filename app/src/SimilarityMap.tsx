@@ -20,10 +20,12 @@ type ColorMode = "cluster" | "tempo" | "artist" | "preview";
 const MODES: ColorMode[] = ["cluster", "tempo", "artist", "preview"];
 
 export default function SimilarityMap({
+  visible,
   onOpen,
   onPlay,
   onClose,
 }: {
+  visible: boolean;
   onOpen: (id: number) => void;
   onPlay: (id: number, title: string) => void;
   onClose: () => void;
@@ -35,8 +37,16 @@ export default function SimilarityMap({
   const [size, setSize] = useState({ w: window.innerWidth, h: window.innerHeight - 46 });
   const fgRef = useRef<any>(null);
 
-  useEffect(() => {
+  // Fetch + graph ONCE; the component stays mounted (hidden) between opens, so
+  // it never re-fetches or re-simulates. Use ↻ Reload to recompute on demand.
+  const load = () => {
+    setSel(null);
+    setErr(null);
+    setGraph(null);
     invoke<Graph>("similarity_graph").then(setGraph).catch((e) => setErr(String(e)));
+  };
+  useEffect(() => {
+    load();
   }, []);
 
   useEffect(() => {
@@ -69,7 +79,7 @@ export default function SimilarityMap({
     : { nodes: [], links: [] };
 
   return (
-    <div className="map-overlay">
+    <div className="map-overlay" style={{ display: visible ? "flex" : "none" }}>
       <div className="map-toolbar">
         <strong>Similarity Map</strong>
         <span style={{ color: "#8b93a2" }}>
@@ -82,6 +92,7 @@ export default function SimilarityMap({
           </button>
         ))}
         <div style={{ flex: 1 }} />
+        <button onClick={load} title="Recompute from the current catalog">↻ Reload</button>
         <button onClick={onClose}>✕ Close</button>
       </div>
       {err && <div className="map-error">{err}</div>}
