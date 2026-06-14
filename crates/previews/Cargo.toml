@@ -13,4 +13,3 @@ quick-xml = { version = "0.31", features = ["serialize"] }
 flate2 = "1"
 hound = "3"
 lru = "0.12"
-rayon = "1.10"

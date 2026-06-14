@@ -6,8 +6,16 @@ on-demand **fallback preview**. Written for handoff — a new engineer (or futur
 AI) should not need to re-derive the `.als` structure or the algorithm.
 
 Status (2026-06-13): **Python prototype BUILT and validated** on the example
-library; logic is the source of truth. **Rust port not started.** UI wiring not
-started.
+library; logic is the source of truth. **Rust parser + engine PORTED**
+(`crates/previews/src/sketch/{parser,engine}.rs`); wired through `ops::sketch`,
+the CLI `sketch` cmd, and a Tauri `sketch_preview` command + UI fallback. The
+engine is a faithful port of the prototype (SR-convert, content offset,
+overlap/eff_end, fades, mute/solo/disabled, Simpler slice, linear repitch,
+kick/perc/tonal synth, de-click, normalize, trim); decode is symphonia
+`SampleBuffer::<f32>` (handles PCM + mp3/m4a); caches are bounded `lru`; relink
+uses the catalog DB. **Still pending**: a host build/compile check (no Rust
+toolchain in the agent sandbox), an ear-check of real samples, warp
+time-stretch, and the track-solo field parse (needs a solo'd example `.als`).
 
 ---
 
