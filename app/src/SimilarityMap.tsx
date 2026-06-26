@@ -72,6 +72,7 @@ export default function SimilarityMap({
     else fg.pauseAnimation?.();
   }, [visible]);
 
+
   const clusterColor = (c: number) => `hsl(${(c * 137.508) % 360},65%,60%)`;
   const artistHue = (a: string) => {
     let h = 0;
@@ -195,13 +196,14 @@ export default function SimilarityMap({
           graphData={data as any}
           nodeId="id"
           nodeColor={(n: any) => (n.id === hover?.id ? "#ffffff" : nodeColor(n))}
-          nodeVal={(n: any) => (n.id === hover?.id ? 6 : 1)}
-          nodeRelSize={4}
-          nodeOpacity={0.92}
-          nodeResolution={6}
+          nodeVal={(n: any) => (n.id === hover?.id ? 4 : 1.3)}
+          nodeRelSize={6}
+          nodeOpacity={0.95}
+          nodeResolution={8}
           linkVisibility={() => showLinks}
-          linkColor={() => "rgba(140,160,200,0.14)"}
-          linkWidth={0.4}
+          linkColor={() => "#7488c4"}
+          linkOpacity={0.3}
+          linkWidth={0.7}
           backgroundColor="#0d0f13"
           warmupTicks={20}
           cooldownTicks={80}
