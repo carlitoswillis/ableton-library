@@ -2,7 +2,7 @@
 
 Local-first catalog for Ableton Live projects: browse, search, and (eventually) preview your library without opening Live. No Ableton SDK, no cloud — it reads `.als` files (gzipped XML) straight from disk.
 
-**Status**: Milestone 1 (metadata extraction) complete and verified. Milestone 2 (SQLite index) in progress. UI (Tauri) comes later. See `ai/PROJECT_STATE.md` for live status.
+**Status**: usable end-to-end. Metadata extraction (M1) and the SQLite catalog (M2) are done and verified; the `ableton-scan` CLI and the Tauri desktop app both run over the same catalog. Previews come from three sources — discovered bounces, an automated Live export worker (drives a real Live install via UI automation), and a no-Ableton approximate "sketch" render. The app also has **lists/favorites**, **artist** filing (path-derived + hand-tag), and a **3D similarity map** of the whole library. Active fronts: sketch-render fidelity, similarity-map signals (MIDI key + audio sounds-alike), and background/VM rendering. See `ai/PROJECT_STATE.md` for the live running log.
 
 ## Build & run
 
@@ -79,6 +79,12 @@ The **All lists ▾** filter next to the search box narrows results to one list,
 
 Membership is stored by the set's path, not its database row, so your lists **survive rescans** (re-ingesting a changed set won't drop it from your lists). Deleting a list just removes the grouping — never the sets or files.
 
+## Similarity map — the "galaxy" view (desktop app)
+
+The header **🌌 Map** button opens a full-screen 3D force-graph where the whole library is laid out as a galaxy: **similar sets cluster together**. Similarity is a blend of shared samples and devices (Jaccard), tempo (half/double-time aware), an artist/project prior, and set-name TF-IDF; nearest neighbours are found via an inverted index, and clusters fall out of weighted label propagation. Color the nodes by **cluster / tempo / artist / has-preview**, and **click any node** to open it in the normal detail pane and play it — a real bounce if one exists, otherwise a sketch rendered on the fly. The layout runs client-side (`react-force-graph-3d`); the backend (`ops::similarity::build_graph` over `indexer::load_graph_features`) just computes the blend and ships nodes+edges.
+
+It's **Phase 1**: metadata-only. The two signals the map most wants — MIDI **key** and **audio "sounds-alike"** (from real bounces only; the sketch is deliberately *not* a feature source) — are next, with weights already reserved in the blend. The map is the app's heaviest view; it pauses its WebGL loop while hidden. Reference oracle (standalone HTML): `tools/similarity_map.py`. Full design: `ai/SIMILARITY_GRAPH_DESIGN.md`.
+
 ## Scanning iCloud folders — read first
 
 If your projects live in iCloud Drive with "Optimize Mac Storage" on, some files may be **evicted** (cloud-only placeholders). Reading them forces a download — a full scan can trigger a large sync, and evicted files that can't download in time may error or hash incorrectly.
@@ -116,15 +122,21 @@ The app reads `~/Library/Application Support/ableton-library/library.db` — ind
 
 ```
 crates/als-core/            # parser lib: gzip + streaming XML -> SetSnapshot; discovery
+crates/previews/            # render discovery, name matching, symphonia peaks, sketch engine
 crates/indexer/             # SQLite + FTS5 catalog (shared by CLI and app)
-crates/cli/                 # the ableton-scan binary
+crates/ops/                 # workflows shared by cli + app (scan, triage, similarity, sketch…)
+crates/cli/                 # the ableton-scan binary (thin wrappers over ops/indexer)
 app/                        # Tauri 2 + React desktop app (src-tauri/ = Rust side)
 tools/reference_extract.py  # executable spec / test oracle for als-core
 tools/export_set.py         # Auto-Export UI automation (drives real Ableton Live)
 tools/sketch_render.py      # approximate "sketch" preview prototype (no Ableton)
+tools/similarity_map.py     # similarity-map oracle (writes a standalone HTML galaxy)
 ai/                         # project state, architecture, agent rules (start here)
+CODEBASE_GUIDE.md           # in-depth, greppable developer map — read before touching code
 example-project-library/    # local test fixtures (gitignored)
 ```
+
+The crate layering is `als-core` + `previews` → `indexer` → `ops` → `cli` / `app`; a library crate never imports a frontend.
 
 ## Development workflow
 

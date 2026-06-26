@@ -1,5 +1,5 @@
 # AI Context Bundle
-Generated: Sat Jun 13 01:54:48 UTC 2026
+Generated: Fri Jun 26 14:35:47 PDT 2026
 
 ## ⚠️ Agent Navigation Guide
 1. Start with the **Current State** below to understand the focus.
@@ -40,7 +40,8 @@ To minimize token waste and maximize focus, follow this priority sequence:
 1. **START HERE**: Read `PROJECT_STATE.md`. It defines the current high-level objective and active milestones.
 2. **Operational Rules**: Read `AGENTS.md` (this file). Adhere strictly to these constraints.
 3. **Architecture Details**: Read `ARCHITECTURE.md` to understand the system components and data flow.
-4. **Self-Correction**: If you feel your understanding of the project state is out of sync, you may run `./ai/ai-context.sh` to refresh your local context bundle.
+4. **Deep reference**: Read `CODEBASE_GUIDE.md` (at the repo root) — the in-depth, greppable developer map (full data model, subsystem-by-subsystem reference, invariants, and step-by-step recipes for common changes). Start here before touching code.
+5. **Self-Correction**: If you feel your understanding of the project state is out of sync, you may run `./ai/ai-context.sh` to refresh your local context bundle.
 
 ## 2. Architecture (ARCHITECTURE.md)
 # Architecture
@@ -81,24 +82,31 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
 
 ### 2. Metadata & Indexing Service — `indexer` (Rust + SQLite)
 - **Decision**: SQLite with FTS5 (over names) for search.
-- **Model**: A project *folder* contains one or more `.als` *sets*. Tables: projects -> sets (tempo, version, hash, mtime) -> tracks, plugins, samples (path + missing flag), previews.
+- **Model**: A project *folder* contains one or more `.als` *sets*. Tables: projects (name, folder_path, `artist`) -> sets (tempo, version, hash, mtime, `artist_override`) -> tracks, plugins, samples (path + missing flag), previews. Plus user **lists** (favorites/collections, schema v9): `lists` + `list_items(list_id, als_path)` — many-to-many, keyed by `als_path` so membership survives re-ingest; `SearchHit.in_list` + `SearchOpts.list_id` drive the row star and list filter.
+- **Artist (schema v7/v8)**: not in the `.als` — derived from the folder PATH at scan time (`ops::artist::infer_artist`: `artists/<name>` marker over the full path, else a year/month/bucket-skipping pass below the scan root) and stored on the project (`--artist` overrides; `reindex-artists` backfills from stored paths with no rescan). A per-SET manual override (`sets.artist_override`) lets one set differ from its folder; the **effective artist = `COALESCE(sets.artist_override, projects.artist)`** and is what `search` (filter/sort/`SearchHit`) and `list_artists` use. Scan/reindex only ever write `projects.artist`, so per-set overrides survive.
 - **Incremental**: Reindex keyed on mtime + content hash. Index lives in app data dir, never inside user project folders.
 
 ### 3. Preview Service (pluggable source interface)
 - **Pipeline**: watcher sees .als save -> debounced job queue -> preview *source* resolves audio -> peaks cached -> catalog updated.
-- **Constraint**: Reimplementing Live's render engine is ruled out permanently. Live itself is the only correct renderer.
+- **Constraint**: Reimplementing Live's render engine *faithfully* is ruled out permanently — Live is the only **correct** renderer (sources a–c). An explicitly-**approximate** sketch (source d) is permitted as a clearly-labeled fallback, never presented as the real render.
 - **Sources (priority)**:
   - (a) **Discovery** (MVP): user-exported renders in/near project folder; Live 12 set previews in `Ableton Project Info/` (verify); frozen/processed audio fallback.
   - (b) **Automated Live export** (flagship, post-catalog; queue infra BUILT): `export_jobs` table (schema v3) + worker loop in the Tauri backend (polls every 3s while "Auto-Export" is toggled on, one render at a time) + `tools/export_set.py` UI automation; finished renders are attached as previews (source=worker, confidence=1.0). Sets are queued from the UI per-row, from the detail pane, or in bulk via multi-select (checkboxes, cmd-click toggle, shift-click range; `add_to_export_queue_bulk`). Worker launches a *second* Live install with the set, drives File -> Export via macOS UI automation (proven previously by owner). Constraints: serialize one render at a time; debounce save bursts; handle dialogs (missing samples, version prompts); UI scripting steals focus so make it opt-in/idle-scheduled; treat Live as flaky (timeouts, retry once, mark "render failed" rather than wedging queue). Isolated component — can start as a standalone script consuming jobs and emitting audio files.
 - **Previews are per-SET, not per-project** (projects can hold multiple distinct .als, e.g. "wanna be your" + "wanna be your2"). Discovery must match found renders to sets by filename similarity (normalized prefix match vs set name); ambiguous matches attach at project level with low confidence. The export worker has no ambiguity (it knows which set it rendered).
   - (c) **FUTURE — headless/remote render via plugin substitution** (backlog, detailed in PROJECT_STATE.md): pre-render sanitize pass swaps third-party AU/VST/VST3 devices on a TEMP COPY of the .als for built-in Suite equivalents with translated parameters, so the set opens clean in a Live install on a VM/spare/remote machine with zero 3rd-party plugins — rendering without touching the user's active computer. Originals never modified; previews labeled approximate with a substitution log. Live remains the renderer (constraint above unchanged). Requires a .als WRITER (today we only read), substitution/param-mapping tables, and a remote worker speaking the export_jobs queue.
+  - (d) **Approximate "sketch" render — NO Ableton** (Python prototype `tools/sketch_render.py` is the oracle; **Rust port BUILT** in `crates/previews/src/sketch/{parser,engine}.rs`, wired via `ops::sketch` + CLI `sketch` + Tauri `sketch_preview`; full spec in `ai/SKETCH_RENDER_HANDOFF.md`): reads arrangement audio clips (placed/gain/faded) + MIDI clips (notes trigger the track's REAL Simpler/Sampler sample, repitched per note; generic synth only for true synths with no sample) into a fast no-Ableton mixdown. Honors track mute, per-clip disabled, track mixer volume; resolves samples library-wide like the exporter; one-clip-per-track overlap resolution; de-clicked voices. Intended as the **fallback preview generated on demand when a set has no real bounce**, rendered dynamically, ~60 s cap, surfaced with a visually distinct (different-colored) play control so it's never mistaken for a real render. Known gaps: no warp time-stretch, no FX/automation, generic synth for non-sample instruments.
 - **Waveforms**: Decode (symphonia), precompute peaks once, cache keyed by set hash.
 - **Concurrency**: `hunt_renders` (bulk scan) and standalone `harvest_folder_renders` (the app's per-folder rescan) parallelize audio decoding + peak extraction via `std::thread::scope`. Inside `scan_library`, harvesting is split: `plan_folder_harvest` (cheap matching + DB filter, main thread) emits `DecodeJob`s into the scanner's unified worker pool.
 
 ### 4. User Interface — Tauri 2 [skeleton BUILT 2026-06-11]
 - **Decision**: Tauri 2 shell, React/TS frontend; core logic lives in the Tauri Rust backend (no sidecar). Audio streamed to webview via asset protocol (when previews land).
-- **Implemented**: commands `search`/`inspect`/`stats` (thin wrappers over `indexer`); debounced FTS search, bpm/plugin filters, results table, detail pane. Dev-only config (bundle.active=false, no icons yet).
-- **Views**: Library View (Search/Filters) ✓, Set Detail pane ✓; Player pending Milestone 3.
+- **Implemented**: commands `search`/`inspect`/`stats` (thin wrappers over `indexer`); debounced FTS search, bpm/plugin/**artist** filters, results table, detail pane. Artist UX: detail-pane editor (Save-this-set / Apply-to-project), bulk **Tag N** from the selection bar, **Reindex Artists** header button (commands `set_artist`/`set_project_artist`/`set_artist_bulk`/`reindex_artists`/`list_artists`). Dev-only config (bundle.active=false, no icons yet).
+- **Views**: Library View (Search/Filters) ✓, Set Detail pane ✓, Player ✓, **Similarity Map** ✓ (see §5).
+
+### 5. Set Similarity Map — alternative "galaxy" view [Phase 1 BUILT 2026-06-13]
+- **What**: a 3D force-graph "map" of the whole library where similar sets cluster together, colorized, opened as an **open/close full-screen overlay** (header 🌌 Map button), not inline. Full design + locked decisions in `ai/SIMILARITY_GRAPH_DESIGN.md`; running log + perf backlog in `PROJECT_STATE.md`. Reference oracle: `tools/similarity_map.py`.
+- **Pipeline**: `indexer::load_graph_features` (per-set features by SQL aggregation) -> `ops::similarity::build_graph` (blend: shared samples/devices Jaccard, tempo, artist/project prior, name TF-IDF; inverted-index kNN; label-propagation clusters) -> Tauri `similarity_graph` -> `app/src/SimilarityMap.tsx` (`react-force-graph-3d` lays out + renders in 3D; no Rust layout). Node click reuses the existing detail pane + player (`playById` plays a real preview or generates a sketch on the fly).
+- **Not yet**: MIDI **key** and **audio sounds-alike** (real bounces only — the sketch is NOT a feature source) signals; weights reserved in the blend. Perf: pause WebGL while hidden; backend recompute not yet cached.
 
 ## Data Flow
 ```
@@ -129,6 +137,113 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
 
 ## 3. Project State (PROJECT_STATE.md)
 # Project State
+
+## 🌌 SET SIMILARITY GRAPH — Phase 1 WORKING on host (2026-06-13)
+- **What**: an alternative "map" view of the 2000+ sets — a 3D galaxy where similar sets cluster together, colorized, opened as an **open/close full-screen overlay** (header "🌌 Map" button), NOT inline. Design + locked decisions in `ai/SIMILARITY_GRAPH_DESIGN.md`.
+- **Prototype (oracle)**: `tools/similarity_map.py` reads the catalog DB, computes the blend + kNN + clusters, writes a standalone HTML map. Validated on real data (2379 sets → 152 clusters, artist-coherent; e.g. one cluster is entirely "9:19"). This is the reference for the Rust port, like `sketch_render.py`.
+- **In-app implementation (Phase 1)**: metadata blend only — shared samples (Jaccard), devices (Jaccard), tempo (half/double-aware), artist/project prior (strong bond), name TF-IDF. kNN via inverted index; weighted label-propagation clusters; **no Rust layout** (react-force-graph-3d lays out in 3D client-side).
+  - `indexer::load_graph_features(conn) -> Vec<GraphSet>` (new) — per-set features by SQL aggregation.
+  - `ops::similarity::build_graph(&sets, k) -> GraphData{nodes,edges}` (new) — faithful port of the prototype.
+  - Tauri cmd `similarity_graph()` in `app/src-tauri/src/lib.rs` (registered).
+  - Frontend `app/src/SimilarityMap.tsx` (new) — ForceGraph3D, color-by toggles (cluster/tempo/artist/preview), node click → info card with Play / Open-detail. Wired into `App.tsx` via `showMap` overlay; `playById` plays the real preview or generates a sketch on the fly. New deps: `react-force-graph-3d`, `three` (+ `@types/three`).
+  - Polish (2026-06-13): the overlay **mounts once and hides/shows** (so it doesn't refetch/re-simulate on every open) + a ↻ Reload button to recompute on demand; **snap-to-nearest** cursor targeting (projects nodes via `graph2ScreenCoords`, highlights/clicks the closest node within ~34px so you don't need pixel-precise aim); `graphData` is `useMemo`'d so hover re-renders never restart the 3D layout.
+- **NOT in yet**: MIDI **key** and **audio sounds-alike** (real bounces only) — the two signals the user most wants; next iteration. Weights for them are reserved in the blend.
+- **Status (2026-06-13)**: builds and runs in the app (user-confirmed). The big "carlitos" cluster (~176) is a catch-all from the strong artist weight; expected to split once key/audio land.
+- **BACKLOG — performance (user: "slows the whole app down here and there")**: the 3D map is the main perf cost. **Applied 2026-06-13**: pause WebGL when hidden; skip nearest-projection while orbiting; `enablePointerInteraction={false}` (kills react-force-graph's per-pointer-move raycast over all ~2379 nodes — biggest hover/orbit win) with our own snap-to-nearest doing hover+click; links hidden by default + toggle (was rendering ~12k lines/frame); `nodeResolution` 8→6; warmup/cooldown 40/120→20/80. Remaining/known causes:
+  - *Hidden-but-mounted render loop*: the overlay mounts once and hides/shows; react-force-graph kept its WebGL animation loop running while hidden. **Fixed (2026-06-13)**: pause via `fgRef.pauseAnimation()` when `!visible`, resume on show. Verify this resolved the background drag.
+  - *Continuous 3D render while open*: three.js renders every frame even when idle; inherent. Options: lower `cooldownTicks`, stop the engine once settled (`onEngineStop`), or throttle. Acceptable when the map is the focus, but watch CPU.
+  - *Snap-to-nearest projects all ~2379 nodes per rAF on mousemove* (`graph2ScreenCoords`). Fine so far; if it bites, spatial-bin the screen projections or cap to a frustum/region.
+  - *Backend `similarity_graph` recomputes from scratch* (sync work inside an async Tauri command) — blocks the async runtime ~1–2s on first open / Reload. Mitigations: `spawn_blocking`, and/or cache `GraphData` keyed by catalog `content_hash` (invalidate on scan). Not yet done.
+  - *Whole graph held in memory + large JSON to the webview* (~2379 nodes + ~12k edges) — fine at this size; revisit if the catalog grows a lot.
+- **DB copy**: `library.db` was copied into the repo root so the agent could run the Python prototype; it's gitignored (`*.db`) and disposable — the real catalog lives in the app-data dir and is untouched.
+
+## ⚡ SKETCH / APPROXIMATE PREVIEW RENDERER (2026-06-13 — Python prototype validated; Rust engine ported)
+
+- **RUST ENGINE PORT (2026-06-13, `crates/previews/src/sketch/engine.rs`)**: rewrote the engine as a faithful port of `tools/sketch_render.py` (the source of truth) after a review found the first pass had drifted badly from it. Fixes vs that first pass: decode now uses `SampleBuffer::<f32>::copy_interleaved_ref` (the F32-only path silently dropped all PCM/S16/S24/S32 WAVs → silence); added sample-rate conversion (48k samples were playing at the wrong speed), content offset, `eff_end`/overlap resolution, clip fades, track mute/solo/per-clip Disabled filtering, Simpler `[SampleStart:SampleEnd]` slicing, **linear**-interp repitch (was nearest-neighbour), kick/perc/tonal synth (was one sine; the synth-fallback also had a mono-into-interleaved bug playing it 2× and garbling L/R), de-click on every voice, −1.5 dBFS normalize, trailing-silence trim. **Kept** the good additions: bounded `lru` caches and the DB-backed catalog relink (`indexer::sample_paths_by_basename`). **Dropped** rayon + the global `Mutex<mix>` (it serialised every sample write and held the cache lock across decode — single-threaded matches the validated ~1–1.8s target). Public `render_sketch`/`write_wav_file` signatures unchanged, so `ops::sketch` + the CLI `sketch` cmd + the Tauri `sketch_preview` command/UI are untouched. **NOT compiler-verified** (no Rust toolchain in the agent sandbox) and **not ear-checked**; validate on the host with `ableton-scan sketch <set> -o out.wav` then in-app.
+- **BACKLOG — sketch fidelity has a LONG way to go (user, 2026-06-13)**: the Rust port is "a lateralish move" — it's an honest reimplementation of the same approximate logic, not a quality jump. The rough render is still missing the things that make a set actually sound like itself (warp time-stretch, device/plugin FX, mixer automation, sends/returns, real synth timbres). Direction the user floated: **go back to the project/set path and really scour how Ableton itself renders** — i.e. study the `.als`/warp/device model more deeply (and what Live does at bounce time) so we can build a meaningfully better rough render rather than incrementally patching the current sketch. Treat the current sketch as a stopgap preview, not the destination. Next real fidelity steps in rough order: warp time-stretch (biggest gap), then approximate stock-device FX (gain/EQ/comp/reverb/delay), then mixer automation. This is a research-then-rebuild track, not a quick fix.
+- **What & why**: a fast, no-Ableton "sketch" render of a set, to serve as a **fallback preview** when a set has no real bounce. User reversed the earlier "no approximation" stance ("doesn't hurt to try"). Tool: `tools/sketch_render.py` (stdlib + numpy; prototyped in Python because the sandbox can't build Rust, and to hear-test the logic on the example library before porting).
+- **How it works**: streams the `.als` (gzip→XML iterparse), pulls **arrangement** clips only (session/ClipSlot clips excluded). AUDIO clips: resolve sample (abs Path → project-relative RelativePath → basename walk), decode (stdlib aifc/wave + numpy), place at `CurrentStart` beats (→sec via tempo), content offset from Loop/warp markers, apply SampleVolume + linear fades, sum. MIDI clips: parse `Notes>KeyTracks>KeyTrack>{MidiNoteEvent(Time,Duration,Velocity,IsEnabled), MidiKey=pitch}`, tile loop region across the clip span when LoopOn.
+- **MIDI now triggers the REAL instrument sample (user: "i dont like the drums")**: per MIDI track we parse the Simpler/Sampler `MultiSamplePart`s (sample Path/RelativePath, RootKey, KeyRange Min/Max, SampleStart/End). Each note plays the matching part's actual sample, repitched by `note−RootKey` (linear resample, like Simpler Classic mode), cached per (sample, semitone) so repeats are cheap. **Generic synth is now only a FALLBACK** for true synths (Analog/Operator/3rd-party) that have no sample. Validated end-to-end on a real file: +12st → exactly half length (ratio 2.000), cache hits confirmed.
+- **Library-wide relink (user: "just as the export pre-re-links samples, so should this")**: `build_sample_index(root)` walks a library root once (basename→path, skips /Backup) so samples living in OTHER projects' folders resolve — mirrors the exporter. `--library-root` flag (default = project's parent). NOTE: example-lib doesn't bundle the drum one-shots (they're in the user's Ableton/User library), so in-sandbox `real-sample=0` / synth-fallback; on the host with real sample folders indexed they resolve. Rust port should reuse `ops::sample_index`/`places.rs` (the exporter's real relink).
+- **808 auto-tuner — BUILT then REMOVED per user ("leave the potential ill-pitched 808, the replacements sound dumb")**. Instrument 808 samples still play repitched by `note−RootKey` (in tune to the MIDI); we just no longer override RootKey via pitch-detection. (`detect_pitch_midi` deleted.)
+- **GLITCH FIX — overlap resolution (user: "timing is off… glitchy like there is no real grid")**: root cause found in the data — tracks had DUPLICATE/overlapping clips stacked at the same start (king st "ZAY OG SNARE" doubled at beats 64/256; "8-Kamata" tripled at 192/352) — take-lane/comp artifacts. We were summing all of them → every note fired 2–3× slightly offset → flam/smear. Fix `resolve_overlaps()`: a DAW track plays ONE clip at a time, so each clip is truncated at the next clip's start on its track (`eff_end`); same-start dupes collapse to the last in doc order. Effect: king st MIDI notes 1498→770, big guy 2582→816, wanna be your 306→171. This is the main timing fix.
+- **Levels mirror the mix (user: "match levels… mirror my mixing choice")**: track mixer `Volume` (Mixer>Volume>Manual, linear gain, 1.0=0 dB) is parsed and applied per track to both audio clips and MIDI voices, so relative balance reflects the user's mix (e.g. a track at 0.099 sits low). Final normalize keeps overall level sane while preserving balance.
+- **De-click (user: "lots of clicking… smooth attack/decay")**: `declick()` applies a tiny raised-cosine fade to the first/last few ms of EVERY placed buffer — synth voices, instrument-sample voices (faded once in the pitch cache), and audio-clip segments (incl. the hard cut introduced by overlap-truncation). Attack ≈1.5 ms (keeps drum transients punchy), release ≈5 ms. Verified all voice edges now == 0.0.
+- **Speed (user wants on-the-spot dynamic render)**: ~1–1.8 s for a 60 s preview in PYTHON; aggressive caching of decoded samples + per-semitone pitched voices. Real speed target is the Rust port.
+- **Timing — still open**: NO warp time-stretch yet (audio clips play native-rate from a content offset; heavily warped chops drift). Next fidelity axis after the overlap fix.
+- **HANDOFF — ready to port to Rust**: full spec (`.als` structure, algorithm, Rust-port plan, UI-integration plan, open items) is in **`ai/SKETCH_RENDER_HANDOFF.md`**; ARCHITECTURE §3 now lists this as preview source (d). Prototype `tools/sketch_render.py` is the source of truth. Rust port: new module in `crates/previews` (reuse symphonia + `ops::sample_index`/`places` for relink), separate `.als` pass (do NOT touch the oracle-bound `als-core` parser), CLI `sketch` cmd, then a Tauri `sketch_preview(set_id)` command + UI fallback with a different-colored play control. Still needs from user: a set saved with a track solo'd (to wire solo) and a host run to ear-check real drum samples.
+- **Fidelity rules honored**: **track mute** (Mixer>Speaker>Manual=false) and **per-clip Disabled** are respected (user decision: "always respect mutes" — beat-export sets where vocals were muted will render beat-only). **Solo** is NOT yet wired: it DOES persist (user confirmed) but none of the example sets are saved with a solo, so the exact field is unknown — candidate is the track-mixer `SoloSink`; NEEDS a solo'd example `.als` to diff and confirm before wiring. `audible_tracks()`/filter already support solo once the field is read.
+- **Validated (example library, 60s)**: king st (MIDI beat, audio muted) → 1498 notes voiced; big guy → 2582; wanna be your (sample-chopped) → 132 audio + 306 notes; 522 idea → 50 notes (its lone audio clip is an external Downloads `.m4a`, undecodable by stdlib). All non-silent, sane durations. Awaiting user ear-check on synth quality.
+- **Known approximations / gaps**: generic synth ≠ real instruments/plugins; no device FX / automation / sends; no warp time-stretch (native-rate playback — drifts on heavily warped loops); take-lane comp takes can double-stack (minor); stdlib can't decode m4a/mp3 (the **Rust port fixes this via symphonia**, plus speed for on-demand/dynamic rendering).
+- **Productization plan (user UX intent)**: dynamically-rendered FALLBACK preview, ~1 min cap, generated on play when no real preview exists; the play button rendered a DIFFERENT COLOR than real-preview rows. Port to Rust → slot into `previews`/`ops` as a 3rd preview source + a CLI command; reuse existing symphonia decode.
+
+## 🧭 BACKLOG / PLAN — BACKGROUND ("headless") EXPORT IN A VM (2026-06-13 — user idea, NOT built)
+- **User ask**: install Ableton in a VM and mount the user's files "like Docker volumes" so renders run in the background without hijacking the Mac (mouse/keyboard focus theft during automation is the pain).
+- **Reality check (web-verified 2026-06-13)**: Ableton Live has **no headless / CLI / batch render** mode, even in Live 12.4.x — the GUI + UI automation is the ONLY render path (Live remains the renderer, per the standing constraint). So "headless" really means *Live runs on a display/VM you're not interacting with*, still driven by the same AppleScript automation. The win is NOT removing automation — it's that a VM has its OWN display, so renders stop stealing host focus and you can keep working.
+- **Docker is the wrong engine**: Docker-on-Mac is a *Linux* VM and Ableton has no Linux build. The correct equivalent of "Docker + mounted volumes" on macOS is a **macOS guest VM with shared folders** (VirtIO-fs). Same mental model (isolated worker + mounted volumes + consumes the `export_jobs` queue), different tech.
+- **Two hard sub-problems**:
+  1. *The VM must open the set without the user's 3rd-party plugins.* (a) Install + authorize the real plugins in the VM → exact renders, zero new code, but tedious and license-cap-limited; (b) **plugin substitution** (already ARCHITECTURE §3c): a `.als` WRITER rewrites a temp copy swapping 3rd-party AU/VST for Ableton stock devices w/ mapped params → opens clean with zero 3rd-party plugins → previews APPROXIMATE (fine for recall, not mastering). Needs a `.als` writer (we only READ today) + substitution/param-map tables. Big lift.
+  2. *macOS VM licensing/tech*: Apple Silicon runs macOS guests (Virtualization.framework; Tart/UTM/VirtualBuddy), but Apple's SLA caps ~2 macOS VMs/host and you need an Ableton seat usable in the VM. Existing `proxy.rs` + `sample_index` already rewrite paths, so the VM worker just consumes the same `export_jobs` queue against shared sample paths — architecture already anticipates "a remote worker speaking the export_jobs queue."
+- **Phased path (smallest valuable first)**:
+  - **Phase 0 (no VM, cheap, big QoL)**: stop focus theft on the host — run the worker's Live on a virtual/secondary display and/or a separate macOS user session so keystrokes don't target your foreground window. Caveat: System Events keystrokes follow the frontmost app, so true isolation likely still wants a separate session/VM; spike how far a virtual display alone gets us.
+  - **Phase 1 (VM, real plugins)**: macOS guest + Ableton + actual plugins installed; in-VM worker polls the shared queue. Exact renders, no `.als`-writer work. Gated on plugin license headroom.
+  - **Phase 2 (VM, substituted plugins)**: build the `.als` writer + substitution tables so ANY set renders in a stock-only VM regardless of installed plugins. Approximate previews + substitution log. The "install Ableton in a box and forget it" endgame; biggest engineering chunk.
+- **Adjacent note**: Live 12.4 added official **Extensions** (TS/npm wrapper over the Live Object Model) — still GUI-bound, but a cleaner automation surface than AppleScript keystrokes IF the user ever moves off Live 11 (AGENTS.md currently rules the SDK out for Live 11). Doesn't remove the VM need.
+- **Recommendation**: swing-able, yes. Phase 0/1 get ~80% of the comfort (background renders, un-hijacked Mac) far sooner; Phase 2 is the north star but mostly hinges on the `.als` writer + plugin maps. Do Phase 0 next when prioritized.
+
+## ⚡ FTS5 SEARCH PUNCTUATION FIX (2026-06-13 — BUILT, awaiting host rebuild)
+- **User report**: typing a period in the search box → `fts5: syntax error near "."`. Raw user text was bound straight into `f.search MATCH ?1`, so FTS5 operator chars (`.`, `-`, `(`, `:`, `*`, `^`, `"`) crashed the query. Hits constantly because the library is full of them (`be 131.10 bpm`, `2 113.10 bpm`, `tisa - taco bell`, `nasty (prod…)`).
+- **Fix (`crates/indexer/src/lib.rs`)**: new `fts_query(raw)` — extract alphanumeric tokens only (the unicode61 tokenizer already splits on punctuation at INDEX time, so `131.10` is stored as tokens `131`+`10`), wrap each token in double quotes and append `*` (prefix), space-join (implicit AND). Returns `None` for all-punctuation/blank input. `search()` now computes `let fts = o.text.as_deref().and_then(fts_query)` ONCE and keys the bm25-vs-plain ordering branch, the SQL branch, and the `?1` bind off `fts` instead of raw `o.text`; punctuation-only input cleanly degrades to "no text filter". Single choke point ⇒ fixes app AND CLI.
+- **Behavior note**: search is now prefix + token-AND (e.g. `taco bell` matches a set with both tokens; `131.10` matches tokens `131` and `10`). This is effectively what users expect; no quoting/phrase UI exposed.
+- **Tests**: `test_fts_query_sanitization` (pure fn) + `test_search_with_period_in_query` (ingest `be 131.10 bpm` into the FTS table, search `131.10` → 1 hit; bare `.` → no error, no text filter).
+- **VERIFY ON HOST**: `cargo test -p indexer` (two new tests). In app: search `131.10`, `tisa -`, `(prod` → results, no error.
+
+## ⚡ EXPORT PERMISSION HALT + QUEUE SORT (2026-06-13 — BUILT, awaiting host rebuild)
+- **User report**: automated rendering "was working yesterday" but now EVERY job fails. Logs show `System Events got an error: osascript is not allowed to send keystrokes. (1002)` at the first `keystroke` ("Selecting all…"). Diagnosis: **macOS revoked the app's Accessibility grant** (classic dev-time gotcha — a `tauri dev` rebuild produces a new unsigned binary, so TCC silently invalidates the prior Privacy & Security → Accessibility approval; or a permission prompt was dismissed). NOT a code regression. **User fix: System Settings → Privacy & Security → Accessibility → enable the app (toggle off/on if already listed), then re-enable Auto-Export.**
+- **REFINEMENT (2026-06-13, user nailed it)**: the keystroke grant attaches to the process that LAUNCHED the chain, not the app binary or osascript. It "worked yesterday" because the user ran `tauri dev` from **VSCode**, which already had Accessibility; switching to **iTerm** (no grant) broke it. **Stable dev fix: grant the TERMINAL (iTerm/Terminal) Accessibility once — the terminal binary doesn't change on rebuild, so the grant survives every `tauri dev`.** Granting the dev binary `target/debug/...` instead is the trap (ad-hoc signed, new identity each rebuild ⇒ re-add forever). A built `.app` launched by double-click is granted directly (no terminal in the chain). `PERMISSION_ERROR_MSG` (lib.rs) + the export_set.py permission log were updated to explain this launcher-attribution.
+- **Product damage this caused**: the worker treated each 1002 as an ordinary per-job failure → ground through the WHOLE ~80-job backlog (open Live, fail, create+delete a proxy, mark failed, repeat; ~45s each ≈ an hour of thrashing). A permission error is global, identical for every job.
+- **Fix A — detect (`tools/export_set.py`)**: new `is_permission_error()` + `PERMISSION_EXIT_CODE = 42`. On AppleScript failure whose output matches the 1002/-1719/"not allowed to send keystrokes" signature, the script logs an actionable message and exits **42** (distinct from generic exit 1).
+- **Fix B — halt (`app/src-tauri/src/lib.rs` `export_worker_loop`)**: on child exit code 42 (or the same signature found in captured logs as a fallback), set `permission_failure`, write the actionable `PERMISSION_ERROR_MSG` onto the failed job, and **auto-pause Auto-Export** (`ExportState.active=false` + `tx.send(false)` + `export-queue-updated` emit so the UI toggle flips to Paused). **Only this systemic error pauses** — ordinary per-project failures (missing plugin, timeout, crash, ingest fail) still fail-that-job-and-continue exactly as before (user explicitly did NOT want auto-pause on every fail).
+- **Fix C — queue sort (`app/src/App.tsx`)**: render-queue table now sorts by status **failed → completed → pending → processing** (`QUEUE_STATUS_ORDER` + `byQueueStatus`), so worked/failed jobs are easy to scan. Secondary sort: pending by renderability score desc (matches worker easy-first), others newest-first. Also removed a stray `{console.log(...)}` in the job-error JSX (was a `void`-in-ReactNode type error; `tsc --noEmit` now clean).
+- **VERIFY ON HOST**: rebuild via `tauri dev`. With Accessibility still revoked: enable Auto-Export → first job fails with the permission message AND the queue auto-pauses (no 80-job grind). Grant Accessibility, re-enable → renders resume. Open Render Queue → rows grouped failed/completed/pending/processing. `cargo build` (Rust unverified in sandbox — no toolchain); `tsc --noEmit` passed.
+
+## ⚡ MANUAL PREVIEW ATTACH (2026-06-13 — BUILT, awaiting host verification)
+- **User ask**: attach ANY audio file as a set's preview from the app, for bounces named in a way the auto-matcher (filename similarity) won't catch. Backend already existed (`ops::attach` → `indexer::upsert_preview`, source='manual', conf 1.0 → primary; file referenced in place, never moved); only the app lacked a surface.
+- **Built**: Tauri `attach_preview(set_id, audio_path)` (spawn_blocking — decodes audio for peaks; existence-checked), registered. App detail-pane button **"Attach Audio…"** → `openDialog` file picker (audio extensions, `dialog:default` covers file open) → invoke → refresh detail+search+stats. CLI `attach <set> <audio>` unchanged.
+- **VERIFY ON HOST**: open a set, Attach Audio…, pick an oddly-named wav → it becomes the primary preview + plays in the PlayerBar. Frontend+small Rust (app only); rebuild via `tauri dev`.
+- **Doc note**: CODEBASE_GUIDE.md was moved to the repo ROOT (was ai/); references updated.
+
+## ⚡ LISTS / FAVORITES (2026-06-13 — BUILT, awaiting host verification)
+- **User ask**: star to the left of each row (hollow = in no list, filled = in ≥1); click → pick which lists it's in (toggle existing or create new). **Multiple list membership** (many-to-many). "Favorites" = just a user-named list, not special-cased.
+- **Schema v9** (`indexer`): `lists(id, name UNIQUE NOCASE, created_at)` + `list_items(list_id→lists ON DELETE CASCADE, als_path, added_at, PK(list_id,als_path))`. **Membership keyed by `als_path`, NOT set_id** — survives re-ingest (which deletes+reinserts the set row); pruned sets leave harmless orphans that reattach if the set returns. v8→v9 migration gate + fresh path + idempotent tail (CREATE TABLE IF NOT EXISTS). Tests use `PRAGMA foreign_keys=ON` (needed for the cascade assertion).
+- **Indexer API**: create_list (get-or-create, case-insensitive), delete_list, rename_list, all_lists (id,name,count), add_to_list/remove_from_list (by als_path, idempotent), lists_for_path. Search: `SearchOpts.list_id` filter (EXISTS) + `SearchHit.in_list` flag (EXISTS) — one query drives every row's star. Test `test_lists_membership_and_filter` covers multi-membership, in_list, filter, count, remove, cascade-on-delete.
+- **App**: Tauri get_lists/create_list/delete_list/rename_list/lists_for_set/add_set_to_list/remove_set_from_list (resolve set_id→als_path via `set_path`), search gained `list_id`. React: ★/☆ cell (first column) → **fixed-position floating popup** (rendered at root, z-index above all, anchored to the clicked star so the row never clips it) with per-list checkboxes (toggle add/remove) + "new list… / Create"; **All lists ▾** filter dropdown + a **⚙ Manage Lists modal** (inline rename, delete-with-confirm, create; deleting the active filter resets it); `get_lists` loaded on mount + refreshed after every change; star fill updates via `runSearch`.
+- **VERIFIED working on host (user 2026-06-13: "works great")**. UI lean pass: removed the "Any Time Scanned" date filter + its dead `dateScanned` state.
+- **NOT done (possible follow-ups)**: CLI list commands (app-only for now); reorder lists; star in the detail pane; drag-to-list. Per-set artist override and lists are independent.
+- **VERIFY ON HOST**: `cargo test -p indexer` (new lists test). In app: click a hollow star → create "Favorites" + check it → star fills, row appears under the All-lists filter; add same set to a 2nd list; rescan that folder → still in both lists (path-keyed durability).
+
+## ⚡ MANUAL ARTIST ASSIGNMENT (2026-06-13 — BUILT, awaiting host verification)
+- **User decision**: manual tags are **per-SET with project fallback** (not project-only). Effective artist = `COALESCE(sets.artist_override, projects.artist)`. Auto/path derivation still writes `projects.artist`; a hand-tag overrides just one set; manual per-set tags SURVIVE rescans/reindex (those only touch `projects.artist`).
+- **Schema v8** (`indexer`): `ALTER TABLE sets ADD COLUMN artist_override TEXT` + index. SCHEMA_VERSION 7→8, migration gate + fresh path. ALL artist reads now use the COALESCE effective value: `search` SELECT/filter/sort, `SearchHit.artist`, `set_detail` (exposes `artist` effective, `artist_override`, `project_artist`), `list_artists` (now counts SETS by effective artist). New fns: `set_set_artist_override(opt)`, `set_project_artist_opt`. Test `test_per_set_artist_override` covers override→flip→list→clear-fallback.
+- **Surfaces**: Tauri `set_artist` (per-set), `set_project_artist` (whole folder), `set_artist_bulk` (per-set, many) — registered. CLI `set-artist <set> <name> [--project]` ("" clears). App detail pane: artist input prefilled with the set's OWN override, placeholder shows the path-derived value, buttons **Save (this set)** / **Apply to project**; results selection bar: **artist… + Tag N** bulk per-set tagging. All refresh search+stats after.
+- **Known caveat (told nobody yet — flag if it bites)**: scan's `upsert_project` uses `COALESCE(inferred, existing)` on `projects.artist`, so a rescan CAN overwrite a project-level manual tag if the path also yields an artist. Per-SET overrides are always safe (scan/reindex never write `sets.artist_override`). For a project whose path yields nothing, project-level manual tags are also safe.
+- **VERIFY ON HOST**: `cargo test -p indexer` (new per-set test). In app: open a set with no artist → type a name → Save (this set) → it shows + is searchable; select several → Tag → all tagged; CLI `set-artist <id> "X"` then `search --artist X`.
+
+## ⚡ ARTIST SEARCH — FIX ROUND (2026-06-13, from user field test)
+- **Bug found (user data)**: user scans the artist folder DIRECTLY, e.g. root `…/Projects (icloud)/artists/deebo`, project `…/artists/deebo/dahbby Project`. Old `infer_artist` only looked BELOW the root → nothing between root and project → artist NULL → `search --artist deebo` empty. Whole-library scan was just as bad (would pick the literal `artists` folder, not `deebo`).
+- **Fix (`ops::artist`)**: two-pass derivation over the project's FULL absolute path. **Pass 1 (primary, rootless): `artists/`/`artist/` marker** → the next segment is the artist (`artist_from_full_path`); works wherever you point the scan. **Pass 2: positional fallback** below the scan root (year/month/bucket skip, now also skips the marker folder itself). Tests added for deebo across all three scan depths + the `artists/2024` date-after-marker guard.
+- **No-scan reindex (user: "i dont wanna do all that scanning")**: artist is path-only and paths are already in the DB, so added a **backfill that needs no filesystem walk / no `.als` re-parse**: `indexer::all_projects` + `set_project_artist`, `ops::reindex_artists` (marker pass over stored `folder_path`s, tags only non-None), CLI `reindex-artists`, Tauri `reindex_artists` cmd + **"Reindex Artists" header button** (refreshes search+stats). Only requirement is a one-time rebuild (fix lives in source).
+- **VERIFY ON HOST**: rebuild, then `ableton-scan reindex-artists` (or the app button) → `ableton-scan artists` should list `deebo`; `search --artist deebo` returns the set. `cargo test -p ops` covers the marker cases.
+
+## ⚡ ARTIST SEARCH (2026-06-13 — BUILT, awaiting host verification)
+- **What**: projects can now be filtered/grouped by **artist**, derived from the folder path (artist is NOT in the `.als`). User's library is mostly year-filed but partly artist-filed; this taps the path so artist folders become a real, indexed data point.
+- **Decisions (user)**: artist is **auto-inferred from the path with an explicit `--artist` override** (not pure-manual, not pure-heuristic); exposed as its **own structured field/filter**, NOT full-path free-text search (we did NOT touch FTS).
+- **How inferred** (`ops::artist::infer_artist`): walk the segments BETWEEN scan root and the project folder, skip years (`19xx/20xx`), months (names + `1..12`/`01..12`), and generic buckets (`Projects`, `Ideas`, `Beats`, …); first remaining segment = artist; none left ⇒ `None`. Override wins when set. `upsert_project` uses `COALESCE(?, artist)` so a later broad scan that infers nothing never wipes an explicitly-set artist. Unit tests in `ops/src/artist.rs` cover the layouts.
+- **Schema v7** (`indexer`): `ALTER TABLE projects ADD COLUMN artist TEXT` + `idx_projects_artist`. SCHEMA_VERSION 6→7, migration gate added, fresh path runs V7. **Existing catalogs migrate to NULL artist** — a normal rescan (no `--force` needed; `upsert_project` runs every scan) re-derives them.
+- **Surfaces**: indexer `SearchOpts.artist` (substring, case-insensitive), `SearchHit.artist`, `set_detail.artist`, `list_artists()`, sort_by `"artist"`. CLI: `scan --artist`, `search --artist`, new `artists` subcommand. App: Tauri `search` gained `artist` param + new `list_artists` command (registered); `scan_folder` passes `None` (path-guess only); React added artist filter box, "Artist (A-Z)" sort, artist shown in rows + detail meta.
+- **No als-core / parser change** → `tools/reference_extract.py` oracle is UNAFFECTED (verified: git shows als-core + tools untouched). Artist is a path/DB concern only, deliberately kept out of `SetSnapshot`/`json`.
+- **VERIFY ON HOST**: `cargo test -p indexer` (new `test_artist_column_search_and_coalesce`) + `cargo test -p ops` (artist::tests); then `ableton-scan scan <a year tree>` and `scan <an artist folder> --artist "X"`, `ableton-scan artists`, `search --artist X`; in the app, type in the artist box. Oracle re-diff is optional (no parser change) but cheap: `cargo run -p cli -- json example-project-library --pretty | diff - <(python3 tools/reference_extract.py example-project-library --pretty)`.
+- **COMMIT NOTE**: the sandbox could not remove a stale `.git/index.lock` (mount blocks `.git` writes) — changes were left in the working tree for the user to commit on the host. If a commit is still pending, that's why.
 
 ## ⚡ HANDOFF SNAPSHOT v3 (2026-06-13 — read this first)
 - **✅✅ GREEN RUNS CONFIRMED (2026-06-13, user: "its working super great right now!!!!")**: the export worker renders previews end-to-end. The dismissal fix (28e010d, text-field check instead of window-index existence) was the final unlock — renders had been succeeding while the script false-failed them. M4's core loop is FUNCTIONAL: triage -> proxy w/ relinked samples -> Live renders -> preview attached. The contradiction below is therefore resolved in favor of the CURRENT code (full-path AX set works on this macOS version); keep the entry for history.
@@ -314,10 +429,13 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 ```text
 .
 ./Cargo.toml
+./similarity_map.html
 ./tools
+./tools/sketch_render.py
 ./tools/__pycache__
 ./tools/reference_extract.py
 ./tools/export_set.py
+./tools/similarity_map.py
 ./crates
 ./crates/als-core
 ./crates/cli
@@ -339,9 +457,12 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 ./example-project-library/522 idea Project
 ./example-project-library/king st Project
 ./example-project-library/wanna be your Project
+./library.db-wal
 ./target
 ./target/CACHEDIR.TAG
+./target/release
 ./target/debug
+./CODEBASE_GUIDE.md
 ./Cargo.lock
 ./README.md
 ./exports
@@ -349,126 +470,164 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
 ./exports/py.json
 ./exports/leeroy veto.json
 ./exports/rust.json
+./library.db
 ./package-lock.json
 ./ai
+./ai/SIMILARITY_GRAPH_DESIGN.md
 ./ai/ai-context.sh
 ./ai/ARCHITECTURE.md
+./ai/SKETCH_RENDER_HANDOFF.md
 ./ai/archive
 ./ai/CONTEXT_BUNDLE.md
 ./ai/PROJECT_STATE.md
 ./ai/HUMAN.md
 ./ai/AGENTS.md
+./AGENTS.md
+./triage.txt
 ```
 
 ## 5. Recent Git Changes (Summary)
 ```text
-9fe88bf Handoff snapshot v3: flag save-path contradiction as first verification, current code state, verified-vs-pending, ops module map in ARCHITECTURE
-058a15b Polish: dedupe AppleScript failure logs; README documents triage/rescore/relink/proxy + render queue behavior
-5807c1e Tech debt: fix all 4 cargo warnings (unused norm_stem field, mtime_secs fn, needless muts); real tiered-lookup test; untrack+ignore __pycache__; HUMAN.md current
-e1f79ae Context: save path correction (full path in name field != path; Go-To required)
-0b7fc47 Restore Go-To navigation: AX-set full path becomes a literal filename (default dir littered). Cmd+Shift+G to set dir + verified Go-To field, then filename-only in name box
+9613944 feat: 3D set similarity map (Phase 1)
+1b3b9e7 feat: 3D set similarity map (Phase 1)
+d0e6a5d feat(map): pause WebGL when hidden + smooth orbit (skip nearest-projection while dragging); docs: similarity map status + perf backlog across PROJECT_STATE/DESIGN/ARCHITECTURE/CODEBASE_GUIDE; gitignore generated map html
+5570d24 feat: 3D set similarity map in-app (ops::similarity + similarity_graph cmd + SimilarityMap overlay), backed by indexer::load_graph_features; prototype tools/similarity_map.py as oracle
+cf09ff5 feat: 3D set similarity map in-app (ops::similarity + similarity_graph cmd + SimilarityMap overlay), backed by indexer::load_graph_features; prototype tools/similarity_map.py as oracle
 ```
 
 ## 6. Active Diff
 ```diff
+diff --git a/app/src/SimilarityMap.tsx b/app/src/SimilarityMap.tsx
+index 0e1e0f7..392927e 100644
+--- a/app/src/SimilarityMap.tsx
++++ b/app/src/SimilarityMap.tsx
+@@ -72,6 +72,7 @@ export default function SimilarityMap({
+     else fg.pauseAnimation?.();
+   }, [visible]);
+ 
++
+   const clusterColor = (c: number) => `hsl(${(c * 137.508) % 360},65%,60%)`;
+   const artistHue = (a: string) => {
+     let h = 0;
+@@ -195,13 +196,14 @@ export default function SimilarityMap({
+           graphData={data as any}
+           nodeId="id"
+           nodeColor={(n: any) => (n.id === hover?.id ? "#ffffff" : nodeColor(n))}
+-          nodeVal={(n: any) => (n.id === hover?.id ? 6 : 1)}
+-          nodeRelSize={4}
+-          nodeOpacity={0.92}
+-          nodeResolution={6}
++          nodeVal={(n: any) => (n.id === hover?.id ? 4 : 1.3)}
++          nodeRelSize={6}
++          nodeOpacity={0.95}
++          nodeResolution={8}
+           linkVisibility={() => showLinks}
+-          linkColor={() => "rgba(140,160,200,0.14)"}
+-          linkWidth={0.4}
++          linkColor={() => "#7488c4"}
++          linkOpacity={0.3}
++          linkWidth={0.7}
+           backgroundColor="#0d0f13"
+           warmupTicks={20}
+           cooldownTicks={80}
 diff --git a/ai/CONTEXT_BUNDLE.md b/ai/CONTEXT_BUNDLE.md
-index 477bf70..324e43b 100644
+index 0341c0b..4a77305 100644
 --- a/ai/CONTEXT_BUNDLE.md
 +++ b/ai/CONTEXT_BUNDLE.md
 @@ -1,5 +1,5 @@
  # AI Context Bundle
--Generated: Sat Jun 13 01:53:13 UTC 2026
-+Generated: Sat Jun 13 01:54:48 UTC 2026
+-Generated: Sat Jun 13 01:54:48 UTC 2026
++Generated: Fri Jun 26 14:35:47 PDT 2026
  
  ## ⚠️ Agent Navigation Guide
  1. Start with the **Current State** below to understand the focus.
-@@ -130,8 +130,9 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
+@@ -40,7 +40,8 @@ To minimize token waste and maximize focus, follow this priority sequence:
+ 1. **START HERE**: Read `PROJECT_STATE.md`. It defines the current high-level objective and active milestones.
+ 2. **Operational Rules**: Read `AGENTS.md` (this file). Adhere strictly to these constraints.
+ 3. **Architecture Details**: Read `ARCHITECTURE.md` to understand the system components and data flow.
+-4. **Self-Correction**: If you feel your understanding of the project state is out of sync, you may run `./ai/ai-context.sh` to refresh your local context bundle.
++4. **Deep reference**: Read `CODEBASE_GUIDE.md` (at the repo root) — the in-depth, greppable developer map (full data model, subsystem-by-subsystem reference, invariants, and step-by-step recipes for common changes). Start here before touching code.
++5. **Self-Correction**: If you feel your understanding of the project state is out of sync, you may run `./ai/ai-context.sh` to refresh your local context bundle.
+ 
+ ## 2. Architecture (ARCHITECTURE.md)
+ # Architecture
+@@ -81,24 +82,31 @@ app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: sym
+ 
+ ### 2. Metadata & Indexing Service — `indexer` (Rust + SQLite)
+ - **Decision**: SQLite with FTS5 (over names) for search.
+-- **Model**: A project *folder* contains one or more `.als` *sets*. Tables: projects -> sets (tempo, version, hash, mtime) -> tracks, plugins, samples (path + missing flag), previews.
++- **Model**: A project *folder* contains one or more `.als` *sets*. Tables: projects (name, folder_path, `artist`) -> sets (tempo, version, hash, mtime, `artist_override`) -> tracks, plugins, samples (path + missing flag), previews. Plus user **lists** (favorites/collections, schema v9): `lists` + `list_items(list_id, als_path)` — many-to-many, keyed by `als_path` so membership survives re-ingest; `SearchHit.in_list` + `SearchOpts.list_id` drive the row star and list filter.
++- **Artist (schema v7/v8)**: not in the `.als` — derived from the folder PATH at scan time (`ops::artist::infer_artist`: `artists/<name>` marker over the full path, else a year/month/bucket-skipping pass below the scan root) and stored on the project (`--artist` overrides; `reindex-artists` backfills from stored paths with no rescan). A per-SET manual override (`sets.artist_override`) lets one set differ from its folder; the **effective artist = `COALESCE(sets.artist_override, projects.artist)`** and is what `search` (filter/sort/`SearchHit`) and `list_artists` use. Scan/reindex only ever write `projects.artist`, so per-set overrides survive.
+ - **Incremental**: Reindex keyed on mtime + content hash. Index lives in app data dir, never inside user project folders.
+ 
+ ### 3. Preview Service (pluggable source interface)
+ - **Pipeline**: watcher sees .als save -> debounced job queue -> preview *source* resolves audio -> peaks cached -> catalog updated.
+-- **Constraint**: Reimplementing Live's render engine is ruled out permanently. Live itself is the only correct renderer.
++- **Constraint**: Reimplementing Live's render engine *faithfully* is ruled out permanently — Live is the only **correct** renderer (sources a–c). An explicitly-**approximate** sketch (source d) is permitted as a clearly-labeled fallback, never presented as the real render.
+ - **Sources (priority)**:
+   - (a) **Discovery** (MVP): user-exported renders in/near project folder; Live 12 set previews in `Ableton Project Info/` (verify); frozen/processed audio fallback.
+   - (b) **Automated Live export** (flagship, post-catalog; queue infra BUILT): `export_jobs` table (schema v3) + worker loop in the Tauri backend (polls every 3s while "Auto-Export" is toggled on, one render at a time) + `tools/export_set.py` UI automation; finished renders are attached as previews (source=worker, confidence=1.0). Sets are queued from the UI per-row, from the detail pane, or in bulk via multi-select (checkboxes, cmd-click toggle, shift-click range; `add_to_export_queue_bulk`). Worker launches a *second* Live install with the set, drives File -> Export via macOS UI automation (proven previously by owner). Constraints: serialize one render at a time; debounce save bursts; handle dialogs (missing samples, version prompts); UI scripting steals focus so make it opt-in/idle-scheduled; treat Live as flaky (timeouts, retry once, mark "render failed" rather than wedging queue). Isolated component — can start as a standalone script consuming jobs and emitting audio files.
+ - **Previews are per-SET, not per-project** (projects can hold multiple distinct .als, e.g. "wanna be your" + "wanna be your2"). Discovery must match found renders to sets by filename similarity (normalized prefix match vs set name); ambiguous matches attach at project level with low confidence. The export worker has no ambiguity (it knows which set it rendered).
+   - (c) **FUTURE — headless/remote render via plugin substitution** (backlog, detailed in PROJECT_STATE.md): pre-render sanitize pass swaps third-party AU/VST/VST3 devices on a TEMP COPY of the .als for built-in Suite equivalents with translated parameters, so the set opens clean in a Live install on a VM/spare/remote machine with zero 3rd-party plugins — rendering without touching the user's active computer. Originals never modified; previews labeled approximate with a substitution log. Live remains the renderer (constraint above unchanged). Requires a .als WRITER (today we only read), substitution/param-mapping tables, and a remote worker speaking the export_jobs queue.
++  - (d) **Approximate "sketch" render — NO Ableton** (Python prototype `tools/sketch_render.py` is the oracle; **Rust port BUILT** in `crates/previews/src/sketch/{parser,engine}.rs`, wired via `ops::sketch` + CLI `sketch` + Tauri `sketch_preview`; full spec in `ai/SKETCH_RENDER_HANDOFF.md`): reads arrangement audio clips (placed/gain/faded) + MIDI clips (notes trigger the track's REAL Simpler/Sampler sample, repitched per note; generic synth only for true synths with no sample) into a fast no-Ableton mixdown. Honors track mute, per-clip disabled, track mixer volume; resolves samples library-wide like the exporter; one-clip-per-track overlap resolution; de-clicked voices. Intended as the **fallback preview generated on demand when a set has no real bounce**, rendered dynamically, ~60 s cap, surfaced with a visually distinct (different-colored) play control so it's never mistaken for a real render. Known gaps: no warp time-stretch, no FX/automation, generic synth for non-sample instruments.
+ - **Waveforms**: Decode (symphonia), precompute peaks once, cache keyed by set hash.
+ - **Concurrency**: `hunt_renders` (bulk scan) and standalone `harvest_folder_renders` (the app's per-folder rescan) parallelize audio decoding + peak extraction via `std::thread::scope`. Inside `scan_library`, harvesting is split: `plan_folder_harvest` (cheap matching + DB filter, main thread) emits `DecodeJob`s into the scanner's unified worker pool.
+ 
+ ### 4. User Interface — Tauri 2 [skeleton BUILT 2026-06-11]
+ - **Decision**: Tauri 2 shell, React/TS frontend; core logic lives in the Tauri Rust backend (no sidecar). Audio streamed to webview via asset protocol (when previews land).
+-- **Implemented**: commands `search`/`inspect`/`stats` (thin wrappers over `indexer`); debounced FTS search, bpm/plugin filters, results table, detail pane. Dev-only config (bundle.active=false, no icons yet).
+-- **Views**: Library View (Search/Filters) ✓, Set Detail pane ✓; Player pending Milestone 3.
++- **Implemented**: commands `search`/`inspect`/`stats` (thin wrappers over `indexer`); debounced FTS search, bpm/plugin/**artist** filters, results table, detail pane. Artist UX: detail-pane editor (Save-this-set / Apply-to-project), bulk **Tag N** from the selection bar, **Reindex Artists** header button (commands `set_artist`/`set_project_artist`/`set_artist_bulk`/`reindex_artists`/`list_artists`). Dev-only config (bundle.active=false, no icons yet).
++- **Views**: Library View (Search/Filters) ✓, Set Detail pane ✓, Player ✓, **Similarity Map** ✓ (see §5).
++
++### 5. Set Similarity Map — alternative "galaxy" view [Phase 1 BUILT 2026-06-13]
++- **What**: a 3D force-graph "map" of the whole library where similar sets cluster together, colorized, opened as an **open/close full-screen overlay** (header 🌌 Map button), not inline. Full design + locked decisions in `ai/SIMILARITY_GRAPH_DESIGN.md`; running log + perf backlog in `PROJECT_STATE.md`. Reference oracle: `tools/similarity_map.py`.
++- **Pipeline**: `indexer::load_graph_features` (per-set features by SQL aggregation) -> `ops::similarity::build_graph` (blend: shared samples/devices Jaccard, tempo, artist/project prior, name TF-IDF; inverted-index kNN; label-propagation clusters) -> Tauri `similarity_graph` -> `app/src/SimilarityMap.tsx` (`react-force-graph-3d` lays out + renders in 3D; no Rust layout). Node click reuses the existing detail pane + player (`playById` plays a real preview or generates a sketch on the fly).
++- **Not yet**: MIDI **key** and **audio sounds-alike** (real bounces only — the sketch is NOT a feature source) signals; weights reserved in the blend. Perf: pause WebGL while hidden; backend recompute not yet cached.
+ 
+ ## Data Flow
+ ```
+@@ -130,6 +138,113 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
  ## 3. Project State (PROJECT_STATE.md)
  # Project State
  
--## ⚡ HANDOFF SNAPSHOT v3 (2026-06-13 end of session — read this first)
--- **⚠ UNRESOLVED CONTRADICTION — verify FIRST**: the "SAVE PATH CORRECTION" entry below (from a parallel session) says AX-setting the FULL PATH into the save panel's name field does NOT resolve as a path (literal path-named files in the default folder). But the CURRENT code (tools/export_set.py as of 28e010d/058a15b) uses exactly that full-path approach, and the latest narrated logs show it reaching Replace+confirm. TO ADJUDICATE: run one render, then check (a) did the .wav land NEXT TO the .als in the project folder? (b) or did a file named like a whole path appear in the default save folder? If (b), implement the correction entry's design: Go-To panel for the DIRECTORY (AX-set its field, verify it opened), name field for FILENAME only.
-+## ⚡ HANDOFF SNAPSHOT v3 (2026-06-13 — read this first)
-+- **✅✅ GREEN RUNS CONFIRMED (2026-06-13, user: "its working super great right now!!!!")**: the export worker renders previews end-to-end. The dismissal fix (28e010d, text-field check instead of window-index existence) was the final unlock — renders had been succeeding while the script false-failed them. M4's core loop is FUNCTIONAL: triage -> proxy w/ relinked samples -> Live renders -> preview attached. The contradiction below is therefore resolved in favor of the CURRENT code (full-path AX set works on this macOS version); keep the entry for history.
-+- **~~⚠ UNRESOLVED CONTRADICTION~~ (resolved above, kept for context)**: the "SAVE PATH CORRECTION" entry below (from a parallel session) says AX-setting the FULL PATH into the save panel's name field does NOT resolve as a path (literal path-named files in the default folder). But the CURRENT code (tools/export_set.py as of 28e010d/058a15b) uses exactly that full-path approach, and the latest narrated logs show it reaching Replace+confirm. TO ADJUDICATE: run one render, then check (a) did the .wav land NEXT TO the .als in the project folder? (b) or did a file named like a whole path appear in the default save folder? If (b), implement the correction entry's design: Go-To panel for the DIRECTORY (AX-set its field, verify it opened), name field for FILENAME only.
- - **Current code state**: save flow = wait for panel (sheet OR dialog window, 60s) -> 2.5s settle -> AX-set full path in name field -> return -> Replace handled (incl. sheet-of-dialog-panel) -> dismissal = panel's TEXT FIELD gone (NOT window existence — progress dialog reoccupies the window index; this false-failed runs while renders were succeeding, the session's key breakthrough). All AppleScript narration now actually emits ([AS] lines via osascript `log`; do-shell-echo swallowed everything before).
- - **Verified working in real logs**: proxy creation, folder-move + fuzzy sample relink, places indexing w/ budgets, export trigger, Replace click, cancellation, narration. **Not yet verified**: a clean green render end-to-end after the dismissal fix; "told u so"-class sets where the save panel never appears (likely Live still loading old sets — diagnose from [AS] narration).
- - **Tech debt state**: cargo warnings all fixed (5807c1e); README current (058a15b); known accepted debt: duplicated mtime closures across crates, symlink relink kept as explicit CLI tool only.
-@@ -361,113 +362,12 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
- 
- ## 5. Recent Git Changes (Summary)
- ```text
-+9fe88bf Handoff snapshot v3: flag save-path contradiction as first verification, current code state, verified-vs-pending, ops module map in ARCHITECTURE
- 058a15b Polish: dedupe AppleScript failure logs; README documents triage/rescore/relink/proxy + render queue behavior
- 5807c1e Tech debt: fix all 4 cargo warnings (unused norm_stem field, mtime_secs fn, needless muts); real tiered-lookup test; untrack+ignore __pycache__; HUMAN.md current
- e1f79ae Context: save path correction (full path in name field != path; Go-To required)
- 0b7fc47 Restore Go-To navigation: AX-set full path becomes a literal filename (default dir littered). Cmd+Shift+G to set dir + verified Go-To field, then filename-only in name box
--13cb4b0 Context: export breakthrough — false failures from progress-dialog window-index collision
- ```
- 
- ## 6. Active Diff
- ```diff
--diff --git a/ai/ARCHITECTURE.md b/ai/ARCHITECTURE.md
--index 53b4080..4c49d4d 100644
----- a/ai/ARCHITECTURE.md
--+++ b/ai/ARCHITECTURE.md
--@@ -13,7 +13,12 @@ Ableton Library is a metadata and preview indexing system for Ableton projects,
-- crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot; discovery  [BUILT, verified]
-- crates/previews/   # lib: render discovery, name matching, symphonia peaks  [BUILT]
-- crates/indexer/    # lib: SQLite (rusqlite + FTS5) storage; pure, no workflow logic  [BUILT, verified]
---crates/ops/        # lib: workflows (scan_library, hunt_renders, attach) shared by cli + app; multi-threaded  [BUILT]
--+crates/ops/        # lib: workflows shared by cli + app; multi-threaded  [BUILT]
--+                   #   lib.rs: scan_library, hunt_renders, attach
--+                   #   triage.rs: plugin inventory, renderability scoring, iCloud materialize, symlink relink (CLI-only)
--+                   #   sample_index.rs: budgeted recursive audio index, tiered fuzzy lookup
--+                   #   places.rs: Ableton Library.cfg "Places" parsing
--+                   #   proxy.rs: relink planning + proxy .als writer (worker render path)
-- crates/cli/        # bin: `ableton-scan` — thin wrappers over ops/indexer  [BUILT, verified]
-- tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
-- app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: symphonia for waveform peaks
--diff --git a/ai/CONTEXT_BUNDLE.md b/ai/CONTEXT_BUNDLE.md
--index 835b347..672fa31 100644
----- a/ai/CONTEXT_BUNDLE.md
--+++ b/ai/CONTEXT_BUNDLE.md
--@@ -1,5 +1,5 @@
-- # AI Context Bundle
---Generated: Sat Jun 13 01:50:12 UTC 2026
--+Generated: Sat Jun 13 01:53:13 UTC 2026
-- 
-- ## ⚠️ Agent Navigation Guide
-- 1. Start with the **Current State** below to understand the focus.
--@@ -58,7 +58,12 @@ Ableton Library is a metadata and preview indexing system for Ableton projects,
-- crates/als-core/   # lib: gzip (flate2) + streaming XML (quick-xml) -> SetSnapshot; discovery  [BUILT, verified]
-- crates/previews/   # lib: render discovery, name matching, symphonia peaks  [BUILT]
-- crates/indexer/    # lib: SQLite (rusqlite + FTS5) storage; pure, no workflow logic  [BUILT, verified]
---crates/ops/        # lib: workflows (scan_library, hunt_renders, attach) shared by cli + app; multi-threaded  [BUILT]
--+crates/ops/        # lib: workflows shared by cli + app; multi-threaded  [BUILT]
--+                   #   lib.rs: scan_library, hunt_renders, attach
--+                   #   triage.rs: plugin inventory, renderability scoring, iCloud materialize, symlink relink (CLI-only)
--+                   #   sample_index.rs: budgeted recursive audio index, tiered fuzzy lookup
--+                   #   places.rs: Ableton Library.cfg "Places" parsing
--+                   #   proxy.rs: relink planning + proxy .als writer (worker render path)
-- crates/cli/        # bin: `ableton-scan` — thin wrappers over ops/indexer  [BUILT, verified]
-- tools/reference_extract.py  # executable spec / test oracle for als-core; keep in sync
-- app/               # Tauri 2 + React/TS  [BUILT, awaiting first run]; later: symphonia for waveform peaks
--@@ -125,7 +130,14 @@ This repository uses an AI-assisted engineering substrate located in `/ai`
-- ## 3. Project State (PROJECT_STATE.md)
-- # Project State
-- 
---## ⚡ HANDOFF SNAPSHOT v2 (2026-06-12 — read this first)
--+## ⚡ HANDOFF SNAPSHOT v3 (2026-06-13 end of session — read this first)
--+- **⚠ UNRESOLVED CONTRADICTION — verify FIRST**: the "SAVE PATH CORRECTION" entry below (from a parallel session) says AX-setting the FULL PATH into the save panel's name field does NOT resolve as a path (literal path-named files in the default folder). But the CURRENT code (tools/export_set.py as of 28e010d/058a15b) uses exactly that full-path approach, and the latest narrated logs show it reaching Replace+confirm. TO ADJUDICATE: run one render, then check (a) did the .wav land NEXT TO the .als in the project folder? (b) or did a file named like a whole path appear in the default save folder? If (b), implement the correction entry's design: Go-To panel for the DIRECTORY (AX-set its field, verify it opened), name field for FILENAME only.
--+- **Current code state**: save flow = wait for panel (sheet OR dialog window, 60s) -> 2.5s settle -> AX-set full path in name field -> return -> Replace handled (incl. sheet-of-dialog-panel) -> dismissal = panel's TEXT FIELD gone (NOT window existence — progress dialog reoccupies the window index; this false-failed runs while renders were succeeding, the session's key breakthrough). All AppleScript narration now actually emits ([AS] lines via osascript `log`; do-shell-echo swallowed everything before).
--+- **Verified working in real logs**: proxy creation, folder-move + fuzzy sample relink, places indexing w/ budgets, export trigger, Replace click, cancellation, narration. **Not yet verified**: a clean green render end-to-end after the dismissal fix; "told u so"-class sets where the save panel never appears (likely Live still loading old sets — diagnose from [AS] narration).
--+- **Tech debt state**: cargo warnings all fixed (5807c1e); README current (058a15b); known accepted debt: duplicated mtime closures across crates, symlink relink kept as explicit CLI tool only.
--+- **Working agreements unchanged**: user gives product feedback, agent writes all code, user's Mac is the only build/test host; budget + narrate ALL unbounded work; get log dumps BEFORE fixes; update /ai + commit every step.
--+
--+## HANDOFF SNAPSHOT v2 (2026-06-12 — older session log below)
-- - **✅ RELINK REDESIGN (Completed 2026-06-12)**: Relinking now uses **Proxy Sets** (ephemeral `.als` copies in the app cache with absolute path rewriting). Original projects are untouched. No symlinks used for auto-export.
-- - **✅ ABLETON PLACES (Completed 2026-06-12)**: `Library.cfg` is parsed to find user-pinned folders, used as priority search roots for missing samples (especially project-local moves).
-- - **✅ EXPORT WORKER VISIBILITY (Completed 2026-06-12)**: Addressed "stall" perception by injecting real-time logs from the pre-flight sample relinker into the UI logs. Confirmed the worker was active, not stalled, during relinking/iCloud materialization.
--@@ -349,113 +361,12 @@ Phase: Milestone 3 — Previews (discovery half BUILT, awaiting host verificatio
-- 
-- ## 5. Recent Git Changes (Summary)
-- ```text
++## 🌌 SET SIMILARITY GRAPH — Phase 1 WORKING on host (2026-06-13)
++- **What**: an alternative "map" view of the 2000+ sets — a 3D galaxy where similar sets cluster together, colorized, opened as an **open/close full-screen overlay** (header "🌌 Map" button), NOT inline. Design + locked decisions in `ai/SIMILARITY_GRAPH_DESIGN.md`.
++- **Prototype (oracle)**: `tools/similarity_map.py` reads the catalog DB, computes the blend + kNN + clusters, writes a standalone HTML map. Validated on real data (2379 sets → 152 clusters, artist-coherent; e.g. one cluster is entirely "9:19"). This is the reference for the Rust port, like `sketch_render.py`.
++- **In-app implementation (Phase 1)**: metadata blend only — shared samples (Jaccard), devices (Jaccard), tempo (half/double-aware), artist/project prior (strong bond), name TF-IDF. kNN via inverted index; weighted label-propagation clusters; **no Rust layout** (react-force-graph-3d lays out in 3D client-side).
++  - `indexer::load_graph_features(conn) -> Vec<GraphSet>` (new) — per-set features by SQL aggregation.
++  - `ops::similarity::build_graph(&sets, k) -> GraphData{nodes,edges}` (new) — faithful port of the prototype.
++  - Tauri cmd `similarity_graph()` in `app/src-tauri/src/lib.rs` (registered).
++  - Frontend `app/src/SimilarityMap.tsx` (new) — ForceGraph3D, color-by toggles (cluster/tempo/artist/preview), node click → info card with Play / Open-detail. Wired into `App.tsx` via `showMap` overlay; `playById` plays the real preview or generates a sketch on the fly. New deps: `react-force-graph-3d`, `three` (+ `@types/three`).
++  - Polish (2026-06-13): the overlay **mounts once and hides/shows** (so it doesn't refetch/re-simulate on every open) + a ↻ Reload button to recompute on demand; **snap-to-nearest** cursor targeting (projects nodes via `graph2ScreenCoords`, highlights/clicks the closest node within ~34px so you don't need pixel-precise aim); `graphData` is `useMemo`'d so hover re-renders never restart the 3D layout.
++- **NOT in yet**: MIDI **key** and **audio sounds-alike** (real bounces only) — the two signals the user most wants; next iteration. Weights for them are reserved in the blend.
++- **Status (2026-06-13)**: builds and runs in the app (user-confirmed). The big "carlitos" cluster (~176) is a catch-all from the strong artist weight; expected to split once key/audio land.
++- **BACKLOG — performance (user: "slows the whole app down here and there")**: the 3D map is the main perf cost. **Applied 2026-06-13**: pause WebGL when hidden; skip nearest-projection while orbiting; `enablePointerInteraction={false}` (kills react-force-graph's per-pointer-move raycast over all ~2379 nodes — biggest hover/orbit win) with our own snap-to-nearest doing hover+click; links hidden by default + toggle (was rendering ~12k lines/frame); `nodeResolution` 8→6; warmup/cooldown 40/120→20/80. Remaining/known causes:
++  - *Hidden-but-mounted render loop*: the overlay mounts once and hides/shows; react-force-graph kept its WebGL animation loop running while hidden. **Fixed (2026-06-13)**: pause via `fgRef.pauseAnimation()` when `!visible`, resume on show. Verify this resolved the background drag.
++  - *Continuous 3D render while open*: three.js renders every frame even when idle; inherent. Options: lower `cooldownTicks`, stop the engine once settled (`onEngineStop`), or throttle. Acceptable when the map is the focus, but watch CPU.
++  - *Snap-to-nearest projects all ~2379 nodes per rAF on mousemove* (`graph2ScreenCoords`). Fine so far; if it bites, spatial-bin the screen projections or cap to a frustum/region.
++  - *Backend `similarity_graph` recomputes from scratch* (sync work inside an async Tauri command) — blocks the async runtime ~1–2s on first open / Reload. Mitigations: `spawn_blocking`, and/or cache `GraphData` keyed by catalog `content_hash` (invalidate on scan). Not yet done.
++  - *Whole graph held in memory + large JSON to the webview* (~2379 nodes + ~12k edges) — fine at this size; revisit if the catalog grows a lot.
++- **DB copy**: `library.db` was copied into the repo root so the agent could run the Python prototype; it's gitignored (`*.db`) and disposable — the real catalog lives in the app-data dir and is untouched.
++
++## ⚡ SKETCH / APPROXIMATE PREVIEW RENDERER (2026-06-13 — Python prototype validated; Rust engine ported)
++
++- **RUST ENGINE PORT (2026-06-13, `crates/previews/src/sketch/engine.rs`)**: rewrote the engine as a faithful port of `tools/sketch_render.py` (the source of truth) after a review found the first pass had drifted badly from it. Fixes vs that first pass: decode now uses `SampleBuffer::<f32>::copy_interleaved_ref` (the F32-only path silently dropped all PCM/S16/S24/S32 WAVs → silence); added sample-rate conversion (48k samples were playing at the wrong speed), content offset, `eff_end`/overlap resolution, clip fades, track mute/solo/per-clip Disabled filtering, Simpler `[SampleStart:SampleEnd]` slicing, **linear**-interp repitch (was nearest-neighbour), kick/perc/tonal synth (was one sine; the synth-fallback also had a mono-into-interleaved bug playing it 2× and garbling L/R), de-click on every voice, −1.5 dBFS normalize, trailing-silence trim. **Kept** the good additions: bounded `lru` caches and the DB-backed catalog relink (`indexer::sample_paths_by_basename`). **Dropped** rayon + the global `Mutex<mix>` (it serialised every sample write and held the cache lock across decode — single-threaded matches the validated ~1–1.8s target). Public `render_sketch`/`write_wav_file` signatures unchanged, so `ops::sketch` + the CLI `sketch` cmd + the Tauri `sketch_preview` command/UI are untouched. **NOT compiler-verified** (no Rust toolchain in the agent sandbox) and **not ear-checked**; validate on the host with `ableton-scan sketch <set> -o out.wav` then in-app.
++- **BACKLOG — sketch fidelity has a LONG way to go (user, 2026-06-13)**: the Rust port is "a lateralish move" — it's an honest reimplementation of the same approximate logic, not a quality jump. The rough render is still missing the things that make a set actually sound like itself (warp time-stretch, device/plugin FX, mixer automation, sends/returns, real synth timbres). Direction the user floated: **go back to the project/set path and really scour how Ableton itself renders** — i.e. study the `.als`/warp/device model more deeply (and what Live does at bounce time) so we can build a meaningfully better rough render rather than incrementally patching the current sketch. Treat the current sketch as a stopgap preview, not the destination. Next real fidelity steps in rough order: warp time-stretch (biggest gap), then approximate stock-device FX (gain/EQ/comp/reverb/delay), then mixer automation. This is a research-then-rebuild track, not a quick fix.
++- **What & why**: a fast, no-Ableton "sketch" render of a set, to serve as a **fallback preview** when a set has no real bounce. User reversed the earlier "no approximation" stance ("doesn't hurt to try"). Tool: `tools/sketch_render.py` (stdlib + numpy; prototyped in Python because the sandbox can't build Rust, and to hear-test the logic on the example library before porting).
++- **How it works**: streams the `.als` (gzip→XML iterparse), pulls **arrangement** clips only (session/ClipSlot clips excluded). AUDIO clips: resolve sample (abs Path → project-relative RelativePath → basename walk), decode (stdlib aifc/wave + numpy), place at `CurrentStart` beats (→sec via tempo), content offset from Loop/warp markers, apply SampleVolume + linear fades, sum. MIDI clips: parse `Notes>KeyTracks>KeyTrack>{MidiNoteEvent(Time,Duration,Velocity,IsEnabled), MidiKey=pitch}`, tile loop region across the clip span when LoopOn.
++- **MIDI now triggers the REAL instrument sample (user: "i dont like the drums")**: per MIDI track we parse the Simpler/Sampler `MultiSamplePart`s (sample Path/RelativePath, RootKey, KeyRange Min/Max, SampleStart/End). Each note plays the matching part's actual sample, repitched by `note−RootKey` (linear resample, like Simpler Classic mode), cached per (sample, semitone) so repeats are cheap. **Generic synth is now only a FALLBACK** for true synths (Analog/Operator/3rd-party) that have no sample. Validated end-to-end on a real file: +12st → exactly half length (ratio 2.000), cache hits confirmed.
++- **Library-wide relink (user: "just as the export pre-re-links samples, so should this")**: `build_sample_index(root)` walks a library root once (basename→path, skips /Backup) so samples living in OTHER projects' folders resolve — mirrors the exporter. `--library-root` flag (default = project's parent). NOTE: example-lib doesn't bundle the drum one-shots (they're in the user's Ableton/User library), so in-sandbox `real-sample=0` / synth-fallback; on the host with real sample folders indexed they resolve. Rust port should reuse `ops::sample_index`/`places.rs` (the exporter's real relink).
++- **808 auto-tuner — BUILT then REMOVED per user ("leave the potential ill-pitched 808, the replacements sound dumb")**. Instrument 808 samples still play repitched by `note−RootKey` (in tune to the MIDI); we just no longer override RootKey via pitch-detection. (`detect_pitch_midi` deleted.)
++- **GLITCH FIX — overlap resolution (user: "timing is off… glitchy like there is no real grid")**: root cause found in the data — tracks had DUPLICATE/overlapping clips stacked at the same start (king st "ZAY OG SNARE" doubled at beats 64/256; "8-Kamata" tripled at 192/352) — take-lane/comp artifacts. We were summing all of them → every note fired 2–3× slightly offset → flam/smear. Fix `resolve_overlaps()`: a DAW track plays ONE clip at a time, so each clip is truncated at the next clip's start on its track (`eff_end`); same-start dupes collapse to the last in doc order. Effect: king st MIDI notes 1498→770, big guy 2582→816, wanna be your 306→171. This is the main timing fix.
++- **Levels mirror the mix (user: "match levels… mirror my mixing choice")**: track mixer `Volume` (Mixer>Volume>Manual, linear gain, 1.0=0 dB) is parsed and applied per track to both audio clips and MIDI voices, so relative balance reflects the user's mix (e.g. a track at 0.099 sits low). Final normalize keeps overall level sane while preserving balance.
++- **De-click (user: "lots of clicking… smooth attack/decay")**: `declick()` applies a tiny raised-cosine fade to the first/last few ms of EVERY placed buffer — synth voices, instrument-sample voices (faded once in the pitch cache), and audio-clip segments (incl. the hard cut introduced by overlap-truncation). Attack ≈1.5 ms (keeps drum transients punchy), release ≈5 ms. Verified all voice edges now == 0.0.
++- **Speed (user wants on-the-spot dynamic render)**: ~1–1.8 s for a 60 s preview in PYTHON; aggressive caching of decoded samples + per-semitone pitched voices. Real speed target is the Rust port.
++- **Timing — still open**: NO warp time-stretch yet (audio clips play native-rate from a content offset; heavily warped chops drift). Next fidelity axis after the overlap fix.
++- **HANDOFF — ready to port to Rust**: full spec (`.als` structure, algorithm, Rust-port plan, UI-integration plan, open items) is in **`ai/SKETCH_RENDER_HANDOFF.md`**; ARCHITECTURE §3 now lists this as preview source (d). Prototype `tools/sketch_render.py` is the source of truth. Rust port: new module in `crates/previews` (reuse symphonia + `ops::sample_index`/`places` for relink), separate `.als` pass (do NOT touch the oracle-bound `als-core` parser), CLI `sketch` cmd, then a Tauri `sketch_preview(set_id)` command + UI fallback with a different-colored play control. Still needs from user: a set saved with a track solo'd (to wire solo) and a host run to ear-check real drum samples.
++- **Fidelity rules honored**: **track mute** (Mixer>Speaker>Manual=false) and **per-clip Disabled** are respected (user decision: "always respect mutes" — beat-export sets where vocals were muted will render beat-only). **Solo** is NOT yet wired: it DOES persist (user confirmed) but none of the example sets are saved with a solo, so the exact field is unknown — candidate is the track-mixer `SoloSink`; NEEDS a solo'd example `.als` to diff and confirm before wiring. `audible_tracks()`/filter already support solo once the field is read.
++- **Validated (example library, 60s)**: king st (MIDI beat, audio muted) → 1498 notes voiced; big guy → 2582; wanna be your (sample-chopped) → 132 audio + 306 notes; 522 idea → 50 notes (its lone audio clip is an external Downloads `.m4a`, undecodable by stdlib). All non-silent, sane durations. Awaiting user ear-check on synth quality.
++- **Known approximations / gaps**: generic synth ≠ real instruments/plugins; no device FX / automation / sends; no warp time-stretch (native-rate playback — drifts on heavily warped loops); take-lane comp takes can double-stack (minor); stdlib can't decode m4a/mp3 (the **Rust port fixes this via symphonia**, plus speed for on-demand/dynamic rendering).
++- **Productization plan (user UX intent)**: dynamically-rendered FALLBACK preview, ~1 min cap, generated on play when no real preview exists; the play button rendered a DIFFERENT COLOR than real-preview rows. Port to Rust → slot into `previews`/`ops` as a 3rd preview source + a CLI command; reuse existing symphonia decode.
++
 ```
